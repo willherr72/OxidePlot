@@ -1,3 +1,24 @@
+# Rust build output
 /target
+
+# Windows artifacts
 nul
+
+# Claude Code session data
 .claude/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Data files users might drop in
+*.csv
+*.xlsx
+*.xls
