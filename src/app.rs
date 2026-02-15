@@ -12,6 +12,40 @@ use crate::plot3d::renderer as plot3d_renderer;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+/// Get the OS-level cursor position converted to egui window-local
+/// coordinates. Works during external file DnD on Windows where winit
+/// does not forward cursor position events.
+#[cfg(target_os = "windows")]
+fn os_cursor_pos(ctx: &egui::Context) -> Option<egui::Pos2> {
+    #[repr(C)]
+    struct POINT {
+        x: i32,
+        y: i32,
+    }
+    extern "system" {
+        fn GetCursorPos(point: *mut POINT) -> i32;
+    }
+    let mut pt = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut pt) } == 0 {
+        return None;
+    }
+    let ppp = ctx.pixels_per_point();
+    let screen_logical = egui::pos2(pt.x as f32 / ppp, pt.y as f32 / ppp);
+    ctx.input(|i| {
+        i.viewport().inner_rect.map(|inner| {
+            egui::pos2(
+                screen_logical.x - inner.min.x,
+                screen_logical.y - inner.min.y,
+            )
+        })
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn os_cursor_pos(_ctx: &egui::Context) -> Option<egui::Pos2> {
+    None
+}
+
 /// State for the X-axis sync selection dialog.
 pub struct SyncDialogState {
     /// The graph that initiated the sync request.
@@ -338,7 +372,11 @@ impl OxidePlotApp {
         if graph.series.is_empty() {
             graph.x_axis_is_datetime = Some(is_datetime);
             graph.x_axis_name = Some(x_col_name.clone());
-            if y_info.len() == 1 {
+            if let Some((z_name, _)) = &z_info {
+                // 3D: X vs Y vs Z
+                let y_name = y_info.first().map(|(n, _)| n.as_str()).unwrap_or("Y");
+                graph.title = format!("{x_col_name} vs. {y_name} vs. {z_name}");
+            } else if y_info.len() == 1 {
                 graph.title = format!("{} vs. {}", x_col_name, y_info[0].0);
             } else {
                 graph.title = format!("{x_col_name} vs. Multiple Data");
@@ -351,9 +389,15 @@ impl OxidePlotApp {
             vals
         });
 
-        // If Z column provided, switch graph to 3D mode.
+        // If Z column provided, switch graph to 3D mode and store axis names.
         if z_values.is_some() {
             graph.plot_mode = crate::state::data_series::PlotMode::Plot3D;
+            if let Some((z_name, _)) = &z_info {
+                graph.z_axis_name = Some(z_name.clone());
+            }
+            if let Some((y_name, _)) = y_info.first() {
+                graph.y_axis_name = Some(y_name.clone());
+            }
         }
 
         for (y_col_name, y_data) in &y_info {
@@ -528,9 +572,10 @@ impl eframe::App for OxidePlotApp {
         }
 
         // ------------------------------------------------------------------
-        // 1. Handle dropped files (collect paths first to avoid borrow issues)
+        // 1. Collect dropped file paths (processed after panels render in 2a)
         // ------------------------------------------------------------------
         let mut dropped_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut drop_pos: Option<egui::Pos2> = None;
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
                 if let Some(path) = &file.path {
@@ -544,17 +589,15 @@ impl eframe::App for OxidePlotApp {
                     }
                 }
             }
+            if !dropped_paths.is_empty() {
+                drop_pos = i.pointer.hover_pos()
+                    .or(i.pointer.latest_pos());
+            }
         });
-
-        for path in dropped_paths {
-            // Drop onto the first graph, or create one if there are none.
-            let graph_id = self
-                .state
-                .graphs
-                .first()
-                .map(|g| g.id)
-                .unwrap_or_else(|| self.state.add_graph().id);
-            self.load_file(graph_id, &path);
+        // winit on Windows does not forward cursor position during
+        // external DnD, so fall back to the OS-level cursor position.
+        if !dropped_paths.is_empty() && drop_pos.is_none() {
+            drop_pos = os_cursor_pos(ctx);
         }
 
         // ------------------------------------------------------------------
@@ -754,6 +797,46 @@ impl eframe::App for OxidePlotApp {
                 }
             });
         });
+
+        // ------------------------------------------------------------------
+        // 2a. Process dropped files (deferred from step 1 so that
+        //     last_frame_rect is fresh from the current frame's render)
+        // ------------------------------------------------------------------
+        for path in dropped_paths {
+            // Determine which graph the file was dropped on by checking
+            // the pointer position against each graph's last_frame_rect.
+            let graph_id = drop_pos
+                .and_then(|pos| {
+                    // First: exact hit-test against graph rects.
+                    self.state
+                        .graphs
+                        .iter()
+                        .find(|g| g.last_frame_rect.map_or(false, |r| r.contains(pos)))
+                        .map(|g| g.id)
+                        .or_else(|| {
+                            // Fallback: find the graph whose rect centre is
+                            // nearest vertically (handles gaps between panels
+                            // or rects that are slightly too small).
+                            self.state
+                                .graphs
+                                .iter()
+                                .filter_map(|g| {
+                                    g.last_frame_rect
+                                        .map(|r| (g.id, (r.center().y - pos.y).abs()))
+                                })
+                                .min_by(|a, b| a.1.total_cmp(&b.1))
+                                .map(|(id, _)| id)
+                        })
+                })
+                .unwrap_or_else(|| {
+                    self.state
+                        .graphs
+                        .first()
+                        .map(|g| g.id)
+                        .unwrap_or_else(|| self.state.add_graph().id)
+                });
+            self.load_file(graph_id, &path);
+        }
 
         // ------------------------------------------------------------------
         // 2b. Synchronize X-axis across synced graphs

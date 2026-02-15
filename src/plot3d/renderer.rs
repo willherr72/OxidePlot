@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use eframe::egui;
@@ -245,12 +246,18 @@ struct BlitState {
 // Cached offscreen textures (avoid recreating every frame)
 // ---------------------------------------------------------------------------
 
-pub struct CachedOffscreenTextures {
-    pub color_view: wgpu::TextureView,
-    pub depth_view: wgpu::TextureView,
-    pub width: u32,
-    pub height: u32,
-    pub format: wgpu::TextureFormat,
+struct CachedOffscreenTextures {
+    color_view: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+}
+
+/// Per-graph offscreen texture cache. Keyed by graph ID so that each 3D
+/// graph gets its own render target and they don't overwrite each other.
+pub struct OffscreenTextureCache {
+    entries: HashMap<u64, CachedOffscreenTextures>,
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +523,7 @@ fn create_storage_buffer_3d(device: &wgpu::Device, label: &str, data: &[u8]) -> 
 // ---------------------------------------------------------------------------
 
 pub struct Plot3DCallback {
+    pub graph_id: u64,
     pub scatter_data: Vec<Scatter3DData>,
     pub line_data: Vec<Line3DData>,
     pub uniforms_base: Plot3DUniforms,
@@ -543,10 +551,17 @@ impl egui_wgpu::CallbackTrait for Plot3DCallback {
 
         let width = self.viewport_size[0].max(1);
         let height = self.viewport_size[1].max(1);
+        let gid = self.graph_id;
 
-        // -- Get or create cached offscreen textures --
+        // -- Get or create per-graph cached offscreen textures --
         // Only recreate when size changes to avoid exhausting VRAM.
-        let needs_recreate = match callback_resources.get::<CachedOffscreenTextures>() {
+        let cache = callback_resources
+            .entry::<OffscreenTextureCache>()
+            .or_insert_with(|| OffscreenTextureCache {
+                entries: HashMap::new(),
+            });
+
+        let needs_recreate = match cache.entries.get(&gid) {
             Some(cached) => cached.width != width || cached.height != height || cached.format != target_format,
             None => true,
         };
@@ -585,7 +600,7 @@ impl egui_wgpu::CallbackTrait for Plot3DCallback {
             });
             let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            callback_resources.insert(CachedOffscreenTextures {
+            cache.entries.insert(gid, CachedOffscreenTextures {
                 color_view,
                 depth_view,
                 width,
@@ -596,9 +611,10 @@ impl egui_wgpu::CallbackTrait for Plot3DCallback {
 
         // Now safe to hold immutable borrows — no more inserts after this point.
         let resources = callback_resources.get::<Plot3DResources>().unwrap();
-        let cached = callback_resources.get::<CachedOffscreenTextures>().unwrap();
-        let color_view = &cached.color_view;
-        let depth_view = &cached.depth_view;
+        let cached_entry = callback_resources.get::<OffscreenTextureCache>().unwrap()
+            .entries.get(&gid).unwrap();
+        let color_view = &cached_entry.color_view;
+        let depth_view = &cached_entry.depth_view;
 
         // -- Begin offscreen render pass --
         {
@@ -779,6 +795,7 @@ impl egui_wgpu::CallbackTrait for Plot3DCallback {
 
 pub fn create_3d_paint_callback(
     rect: egui::Rect,
+    graph_id: u64,
     scatter_data: Vec<Scatter3DData>,
     line_data: Vec<Line3DData>,
     uniforms_base: Plot3DUniforms,
@@ -788,6 +805,7 @@ pub fn create_3d_paint_callback(
     egui_wgpu::Callback::new_paint_callback(
         rect,
         Plot3DCallback {
+            graph_id,
             scatter_data,
             line_data,
             uniforms_base,

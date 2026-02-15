@@ -202,14 +202,11 @@ pub fn show_graph_panel(
                 .clicked()
             {
                 if cursor_v {
-                    // Turn off
                     graph.cursor_state.mode = CursorMode::Off;
-                    graph.cursor_state.cursor1 = None;
-                    graph.cursor_state.cursor2 = None;
+                    graph.cursor_state.clear();
                 } else {
                     graph.cursor_state.mode = CursorMode::Vertical;
-                    graph.cursor_state.cursor1 = None;
-                    graph.cursor_state.cursor2 = None;
+                    graph.cursor_state.clear();
                 }
             }
             if toolbar_toggle_btn(ui, "H-Cursor", cursor_h)
@@ -217,14 +214,11 @@ pub fn show_graph_panel(
                 .clicked()
             {
                 if cursor_h {
-                    // Turn off
                     graph.cursor_state.mode = CursorMode::Off;
-                    graph.cursor_state.cursor1 = None;
-                    graph.cursor_state.cursor2 = None;
+                    graph.cursor_state.clear();
                 } else {
                     graph.cursor_state.mode = CursorMode::Horizontal;
-                    graph.cursor_state.cursor1 = None;
-                    graph.cursor_state.cursor2 = None;
+                    graph.cursor_state.clear();
                 }
             }
 
@@ -280,6 +274,14 @@ pub fn show_graph_panel(
                 PlotMode::Plot2D => show_gpu_plot(graph, ui, theme, plot_area_height),
                 PlotMode::Plot3D => show_3d_plot(graph, ui, theme, plot_area_height),
             }
+        }
+
+        // Ensure the frame fills the intended panel height even when empty,
+        // so that last_frame_rect covers the full visual area for DnD targets.
+        let used = ui.min_rect().height();
+        let target = (panel_height - 22.0).max(0.0);
+        if used < target {
+            ui.allocate_space(egui::vec2(ui.available_width(), target - used));
         }
     });
     graph.last_frame_rect = Some(frame_resp.response.rect);
@@ -733,6 +735,7 @@ fn show_3d_plot(graph: &mut GraphState, ui: &mut egui::Ui, theme: &Theme, plot_a
     // --- Issue 3D GPU paint callback ---
     let paint_cb = create_3d_paint_callback(
         total_rect,
+        graph.id,
         scatter_data,
         line_data,
         uniforms_base,
@@ -877,11 +880,14 @@ fn draw_3d_axis_labels(
         Some(egui::Pos2::new(screen_x, screen_y))
     };
 
-    // Axis labels at midpoints of edges
+    // Axis labels at midpoints of edges — use column names when available.
+    let x_label = graph.x_axis_name.as_deref().unwrap_or("X");
+    let y_label = graph.y_axis_name.as_deref().unwrap_or("Y");
+    let z_label = graph.z_axis_name.as_deref().unwrap_or("Z");
     let axis_labels = [
-        ("X", [0.0, -1.15, -1.15]),
-        ("Y", [-1.15, 0.0, -1.15]),
-        ("Z", [-1.15, -1.15, 0.0]),
+        (x_label, [0.0, -1.15, -1.15]),
+        (y_label, [-1.15, 0.0, -1.15]),
+        (z_label, [-1.15, -1.15, 0.0]),
     ];
     for (label, pos) in axis_labels {
         if let Some(screen_pos) = project(pos[0], pos[1], pos[2]) {
@@ -1281,6 +1287,7 @@ fn draw_hover_tooltip(
 // ---------------------------------------------------------------------------
 
 fn handle_cursor_click(graph: &mut GraphState, response: &egui::Response, plot_rect: egui::Rect) {
+    use crate::state::graph_state::MAX_CURSORS;
     // Right-click places cursors when in cursor mode (left-click is pan)
     if response.secondary_clicked() {
         if let Some(mouse_pos) = response.interact_pointer_pos() {
@@ -1293,18 +1300,20 @@ fn handle_cursor_click(graph: &mut GraphState, response: &egui::Response, plot_r
                 CursorMode::Off => return,
             };
 
-            if graph.cursor_state.cursor1.is_none() {
-                graph.cursor_state.cursor1 = Some(val);
-            } else if graph.cursor_state.cursor2.is_none() {
-                graph.cursor_state.cursor2 = Some(val);
-            } else {
-                // Both set: reset and place new first cursor
-                graph.cursor_state.cursor1 = Some(val);
-                graph.cursor_state.cursor2 = None;
-            }
+            let idx = graph.cursor_state.next_index;
+            graph.cursor_state.positions[idx] = Some(val);
+            graph.cursor_state.next_index = (idx + 1) % MAX_CURSORS;
         }
     }
 }
+
+/// Distinct colors for cursors C1..C4.
+const CURSOR_COLORS: [egui::Color32; 4] = [
+    egui::Color32::from_rgb(255, 200, 0),   // C1: Yellow
+    egui::Color32::from_rgb(0, 220, 220),    // C2: Cyan
+    egui::Color32::from_rgb(220, 0, 220),    // C3: Magenta
+    egui::Color32::from_rgb(0, 220, 80),     // C4: Green
+];
 
 fn draw_cursors(
     painter: &egui::Painter,
@@ -1316,138 +1325,202 @@ fn draw_cursors(
     unit_ranges: &[UnitRange],
 ) {
     let pv = &graph.plot_view;
-    let cursor_color = egui::Color32::from_rgb(255, 200, 0); // Yellow
-    let stroke = egui::Stroke::new(1.5, cursor_color);
     let font = egui::FontId::proportional(11.0);
-    let text_color = painter.ctx().style().visuals.text_color();
 
     match graph.cursor_state.mode {
         CursorMode::Vertical => {
-            // Draw vertical cursor lines
-            if let Some(x1) = graph.cursor_state.cursor1 {
-                let screen_x = pv.data_to_screen(x1, pv.y_min, plot_rect).x;
-                if screen_x >= plot_rect.left() && screen_x <= plot_rect.right() {
-                    painter.line_segment(
-                        [egui::Pos2::new(screen_x, plot_rect.top()),
-                         egui::Pos2::new(screen_x, plot_rect.bottom())],
-                        stroke,
-                    );
-                    let label = if is_datetime {
-                        format!("C1: {}", crate::data::datetime::format_timestamp(x1))
-                    } else {
-                        format!("C1: {:.4}", x1)
-                    };
-                    painter.text(
-                        egui::Pos2::new(screen_x + 4.0, plot_rect.top() + 4.0),
-                        egui::Align2::LEFT_TOP, label, font.clone(), cursor_color,
-                    );
+            for (i, pos) in graph.cursor_state.positions.iter().enumerate() {
+                if let Some(x) = *pos {
+                    let color = CURSOR_COLORS[i];
+                    let stroke = egui::Stroke::new(1.5, color);
+                    let screen_x = pv.data_to_screen(x, pv.y_min, plot_rect).x;
+                    if screen_x >= plot_rect.left() && screen_x <= plot_rect.right() {
+                        painter.line_segment(
+                            [egui::Pos2::new(screen_x, plot_rect.top()),
+                             egui::Pos2::new(screen_x, plot_rect.bottom())],
+                            stroke,
+                        );
+                        let label = if is_datetime {
+                            format!("C{}: {}", i + 1, crate::data::datetime::format_timestamp(x))
+                        } else {
+                            format!("C{}: {:.4}", i + 1, x)
+                        };
+                        let label_y = plot_rect.top() + 4.0 + (i as f32) * 14.0;
+                        painter.text(
+                            egui::Pos2::new(screen_x + 4.0, label_y),
+                            egui::Align2::LEFT_TOP, label, font.clone(), color,
+                        );
+                    }
                 }
             }
-            if let Some(x2) = graph.cursor_state.cursor2 {
-                let screen_x = pv.data_to_screen(x2, pv.y_min, plot_rect).x;
-                if screen_x >= plot_rect.left() && screen_x <= plot_rect.right() {
-                    painter.line_segment(
-                        [egui::Pos2::new(screen_x, plot_rect.top()),
-                         egui::Pos2::new(screen_x, plot_rect.bottom())],
-                        stroke,
-                    );
-                    let label = if is_datetime {
-                        format!("C2: {}", crate::data::datetime::format_timestamp(x2))
-                    } else {
-                        format!("C2: {:.4}", x2)
-                    };
-                    painter.text(
-                        egui::Pos2::new(screen_x + 4.0, plot_rect.top() + 18.0),
-                        egui::Align2::LEFT_TOP, label, font.clone(), cursor_color,
-                    );
-                }
-            }
-            // Delta display
-            if let (Some(x1), Some(x2)) = (graph.cursor_state.cursor1, graph.cursor_state.cursor2) {
-                let delta = (x2 - x1).abs();
-                let delta_label = if is_datetime {
-                    format!("dX: {:.3}s", delta)
-                } else {
-                    format!("dX: {:.4}", delta)
-                };
-                painter.text(
-                    egui::Pos2::new(plot_rect.left() + 8.0, plot_rect.bottom() - 20.0),
-                    egui::Align2::LEFT_BOTTOM, delta_label, font, text_color,
-                );
-            }
+            draw_vertical_deltas(painter, graph, plot_rect, is_datetime, &font);
         }
         CursorMode::Horizontal => {
-            // Draw horizontal cursor lines with per-unit labels
-            if let Some(y1) = graph.cursor_state.cursor1 {
-                let screen_y = pv.data_to_screen(pv.x_min, y1, plot_rect).y;
-                if screen_y >= plot_rect.top() && screen_y <= plot_rect.bottom() {
-                    painter.line_segment(
-                        [egui::Pos2::new(plot_rect.left(), screen_y),
-                         egui::Pos2::new(plot_rect.right(), screen_y)],
-                        stroke,
-                    );
-                    let label = if multi_unit {
-                        let parts: Vec<String> = unit_order.iter().zip(unit_ranges.iter())
-                            .map(|(u, r)| format!("{:.4} {u}", r.denormalize(y1)))
-                            .collect();
-                        format!("C1: {}", parts.join("  |  "))
-                    } else {
-                        format!("C1: {:.4}", y1)
-                    };
-                    painter.text(
-                        egui::Pos2::new(plot_rect.left() + 4.0, screen_y - 14.0),
-                        egui::Align2::LEFT_BOTTOM, label, font.clone(), cursor_color,
-                    );
-                }
-            }
-            if let Some(y2) = graph.cursor_state.cursor2 {
-                let screen_y = pv.data_to_screen(pv.x_min, y2, plot_rect).y;
-                if screen_y >= plot_rect.top() && screen_y <= plot_rect.bottom() {
-                    painter.line_segment(
-                        [egui::Pos2::new(plot_rect.left(), screen_y),
-                         egui::Pos2::new(plot_rect.right(), screen_y)],
-                        stroke,
-                    );
-                    let label = if multi_unit {
-                        let parts: Vec<String> = unit_order.iter().zip(unit_ranges.iter())
-                            .map(|(u, r)| format!("{:.4} {u}", r.denormalize(y2)))
-                            .collect();
-                        format!("C2: {}", parts.join("  |  "))
-                    } else {
-                        format!("C2: {:.4}", y2)
-                    };
-                    painter.text(
-                        egui::Pos2::new(plot_rect.left() + 4.0, screen_y + 2.0),
-                        egui::Align2::LEFT_TOP, label, font.clone(), cursor_color,
-                    );
-                }
-            }
-            // Delta display (per-unit when multi-unit)
-            if let (Some(y1), Some(y2)) = (graph.cursor_state.cursor1, graph.cursor_state.cursor2) {
-                if multi_unit {
-                    let mut y_pos = plot_rect.bottom() - 20.0;
-                    for (unit, range) in unit_order.iter().zip(unit_ranges.iter()) {
-                        let real_y1 = range.denormalize(y1);
-                        let real_y2 = range.denormalize(y2);
-                        let delta = (real_y2 - real_y1).abs();
-                        painter.text(
-                            egui::Pos2::new(plot_rect.left() + 8.0, y_pos),
-                            egui::Align2::LEFT_BOTTOM,
-                            format!("dY ({unit}): {delta:.4}"), font.clone(), text_color,
+            for (i, pos) in graph.cursor_state.positions.iter().enumerate() {
+                if let Some(y) = *pos {
+                    let color = CURSOR_COLORS[i];
+                    let stroke = egui::Stroke::new(1.5, color);
+                    let screen_y = pv.data_to_screen(pv.x_min, y, plot_rect).y;
+                    if screen_y >= plot_rect.top() && screen_y <= plot_rect.bottom() {
+                        painter.line_segment(
+                            [egui::Pos2::new(plot_rect.left(), screen_y),
+                             egui::Pos2::new(plot_rect.right(), screen_y)],
+                            stroke,
                         );
-                        y_pos -= 16.0;
+                        let label = if multi_unit {
+                            let parts: Vec<String> = unit_order.iter().zip(unit_ranges.iter())
+                                .map(|(u, r)| format!("{:.4} {u}", r.denormalize(y)))
+                                .collect();
+                            format!("C{}: {}", i + 1, parts.join("  |  "))
+                        } else {
+                            format!("C{}: {:.4}", i + 1, y)
+                        };
+                        // Alternate label placement: even cursors above, odd below
+                        let (anchor_y, align) = if i % 2 == 0 {
+                            (screen_y - 2.0, egui::Align2::LEFT_BOTTOM)
+                        } else {
+                            (screen_y + 2.0, egui::Align2::LEFT_TOP)
+                        };
+                        painter.text(
+                            egui::Pos2::new(plot_rect.left() + 4.0, anchor_y),
+                            align, label, font.clone(), color,
+                        );
                     }
-                } else {
-                    let delta = (y2 - y1).abs();
-                    painter.text(
-                        egui::Pos2::new(plot_rect.left() + 8.0, plot_rect.bottom() - 20.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        format!("dY: {:.4}", delta), font, text_color,
-                    );
                 }
             }
+            draw_horizontal_deltas(
+                painter, graph, plot_rect, &font,
+                multi_unit, unit_order, unit_ranges,
+            );
         }
         CursorMode::Off => {}
+    }
+}
+
+/// Draw sequential deltas and total span for vertical cursors.
+fn draw_vertical_deltas(
+    painter: &egui::Painter,
+    graph: &GraphState,
+    plot_rect: egui::Rect,
+    is_datetime: bool,
+    font: &egui::FontId,
+) {
+    let text_color = painter.ctx().style().visuals.text_color();
+    // Collect placed cursor values in slot order
+    let placed: Vec<(usize, f64)> = graph.cursor_state.positions.iter().enumerate()
+        .filter_map(|(i, p)| p.map(|v| (i, v)))
+        .collect();
+    if placed.len() < 2 {
+        return;
+    }
+
+    let mut labels: Vec<String> = Vec::new();
+    // Adjacent deltas: C1-C2, C2-C3, C3-C4
+    for pair in placed.windows(2) {
+        let (i_a, v_a) = pair[0];
+        let (i_b, v_b) = pair[1];
+        let delta = (v_b - v_a).abs();
+        let lbl = if is_datetime {
+            format!("C{}-C{}: {:.3}s", i_a + 1, i_b + 1, delta)
+        } else {
+            format!("C{}-C{}: {:.4}", i_a + 1, i_b + 1, delta)
+        };
+        labels.push(lbl);
+    }
+    // Total span when 3+ cursors
+    if placed.len() >= 3 {
+        let (i_first, v_first) = placed[0];
+        let (i_last, v_last) = placed[placed.len() - 1];
+        let total = (v_last - v_first).abs();
+        let lbl = if is_datetime {
+            format!("C{}-C{} (total): {:.3}s", i_first + 1, i_last + 1, total)
+        } else {
+            format!("C{}-C{} (total): {:.4}", i_first + 1, i_last + 1, total)
+        };
+        labels.push(lbl);
+    }
+
+    // Render at bottom-left, stacking upward
+    let mut y_pos = plot_rect.bottom() - 20.0;
+    let min_y = plot_rect.top() + 20.0;
+    for lbl in &labels {
+        if y_pos < min_y {
+            break;
+        }
+        painter.text(
+            egui::Pos2::new(plot_rect.left() + 8.0, y_pos),
+            egui::Align2::LEFT_BOTTOM, lbl, font.clone(), text_color,
+        );
+        y_pos -= 16.0;
+    }
+}
+
+/// Draw sequential deltas and total span for horizontal cursors.
+fn draw_horizontal_deltas(
+    painter: &egui::Painter,
+    graph: &GraphState,
+    plot_rect: egui::Rect,
+    font: &egui::FontId,
+    multi_unit: bool,
+    unit_order: &[String],
+    unit_ranges: &[UnitRange],
+) {
+    let text_color = painter.ctx().style().visuals.text_color();
+    let placed: Vec<(usize, f64)> = graph.cursor_state.positions.iter().enumerate()
+        .filter_map(|(i, p)| p.map(|v| (i, v)))
+        .collect();
+    if placed.len() < 2 {
+        return;
+    }
+
+    let mut y_pos = plot_rect.bottom() - 20.0;
+    let min_y = plot_rect.top() + 20.0;
+
+    // Helper to render one delta entry (may produce multiple lines for multi-unit)
+    let mut render_delta = |label_prefix: &str, v_a: f64, v_b: f64| {
+        if multi_unit {
+            for (unit, range) in unit_order.iter().zip(unit_ranges.iter()) {
+                if y_pos < min_y { return; }
+                let real_a = range.denormalize(v_a);
+                let real_b = range.denormalize(v_b);
+                let delta = (real_b - real_a).abs();
+                painter.text(
+                    egui::Pos2::new(plot_rect.left() + 8.0, y_pos),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("{label_prefix} ({unit}): {delta:.4}"), font.clone(), text_color,
+                );
+                y_pos -= 16.0;
+            }
+        } else {
+            if y_pos < min_y { return; }
+            let delta = (v_b - v_a).abs();
+            painter.text(
+                egui::Pos2::new(plot_rect.left() + 8.0, y_pos),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{label_prefix}: {delta:.4}"), font.clone(), text_color,
+            );
+            y_pos -= 16.0;
+        }
+    };
+
+    // Total span first (rendered at bottom, will appear below adjacent deltas visually)
+    if placed.len() >= 3 {
+        let (i_first, v_first) = placed[0];
+        let (i_last, v_last) = placed[placed.len() - 1];
+        render_delta(
+            &format!("dY C{}-C{} (total)", i_first + 1, i_last + 1),
+            v_first, v_last,
+        );
+    }
+
+    // Adjacent deltas in reverse order so they stack naturally
+    for pair in placed.windows(2).rev() {
+        let (i_a, v_a) = pair[0];
+        let (i_b, v_b) = pair[1];
+        render_delta(
+            &format!("dY C{}-C{}", i_a + 1, i_b + 1),
+            v_a, v_b,
+        );
     }
 }
 
@@ -1486,16 +1559,78 @@ fn show_table_view(graph: &mut GraphState, ui: &mut egui::Ui) {
     use egui_extras::{Column, TableBuilder};
 
     let num_cols = graph.series.len() + 1;
-    let row_count = graph.series.iter().map(|s| s.x.len()).max().unwrap_or(0);
     let is_datetime = graph.x_axis_is_datetime == Some(true);
+
+    // Fast path: when all series share the same X values (same length +
+    // matching endpoints) we skip the expensive HashMap/BTreeSet build
+    // and use direct array indexing.
+    let first_len = graph.series[0].x.len();
+    let all_same_x = graph.series.iter().all(|s| {
+        s.x.len() == first_len
+            && s.x.first() == graph.series[0].x.first()
+            && s.x.last() == graph.series[0].x.last()
+    });
+
+    // Unified X axis + per-series lookups (only built when series differ).
+    let unified_x: Vec<f64>;
+    let lookups: Vec<std::collections::HashMap<u64, f64>>;
+
+    if all_same_x {
+        unified_x = Vec::new();
+        lookups = Vec::new();
+    } else {
+        use std::collections::BTreeSet;
+        let mut all_x_bits: BTreeSet<u64> = BTreeSet::new();
+        for s in &graph.series {
+            for &xv in &s.x {
+                if xv.is_finite() {
+                    all_x_bits.insert(xv.to_bits());
+                }
+            }
+        }
+        unified_x = all_x_bits.iter().map(|&b| f64::from_bits(b)).collect();
+        lookups = graph
+            .series
+            .iter()
+            .map(|s| {
+                s.x.iter()
+                    .zip(s.y.iter())
+                    .map(|(&xv, &yv)| (xv.to_bits(), yv))
+                    .collect()
+            })
+            .collect();
+    }
+
+    let row_count = if all_same_x { first_len } else { unified_x.len() };
 
     let sorted_indices: Vec<usize> = match graph.table_sort {
         Some((col, dir)) => {
             let mut indices: Vec<usize> = (0..row_count).collect();
             indices.sort_by(|&a, &b| {
-                let val_a = get_table_value(graph, col, a);
-                let val_b = get_table_value(graph, col, b);
-                let cmp = val_a.partial_cmp(&val_b).unwrap_or(std::cmp::Ordering::Equal);
+                let (val_a, val_b) = if all_same_x {
+                    (get_table_value(graph, col, a), get_table_value(graph, col, b))
+                } else {
+                    let va = if col == 0 {
+                        unified_x[a]
+                    } else {
+                        lookups.get(col - 1)
+                            .and_then(|m| m.get(&unified_x[a].to_bits()))
+                            .copied()
+                            .unwrap_or(f64::NAN)
+                    };
+                    let vb = if col == 0 {
+                        unified_x[b]
+                    } else {
+                        lookups.get(col - 1)
+                            .and_then(|m| m.get(&unified_x[b].to_bits()))
+                            .copied()
+                            .unwrap_or(f64::NAN)
+                    };
+                    (va, vb)
+                };
+                let cmp = val_a
+                    .partial_cmp(&val_b)
+                    .unwrap_or(std::cmp::Ordering::Equal);
                 match dir {
                     SortDirection::Ascending => cmp,
                     SortDirection::Descending => cmp.reverse(),
@@ -1554,30 +1689,57 @@ fn show_table_view(graph: &mut GraphState, ui: &mut egui::Ui) {
             body.rows(18.0, row_count, |mut row| {
                 let sorted_row_idx = sorted_indices[row.index()];
 
-                row.col(|ui| {
-                    if let Some(first_series) = graph.series.first() {
-                        if sorted_row_idx < first_series.x.len() {
-                            let xv = first_series.x[sorted_row_idx];
-                            if is_datetime {
-                                ui.label(datetime::format_timestamp(xv));
-                            } else {
-                                ui.label(format!("{xv:.3}"));
-                            }
-                        }
-                    }
-                });
-
-                for series in &graph.series {
+                if all_same_x {
+                    // Fast path: direct array indexing
                     row.col(|ui| {
-                        if sorted_row_idx < series.y.len() {
-                            let yv = series.y[sorted_row_idx];
-                            if yv.is_finite() {
-                                ui.label(format!("{yv:.3}"));
-                            } else {
-                                ui.label("-");
+                        if let Some(first_series) = graph.series.first() {
+                            if sorted_row_idx < first_series.x.len() {
+                                let xv = first_series.x[sorted_row_idx];
+                                if is_datetime {
+                                    ui.label(datetime::format_timestamp(xv));
+                                } else {
+                                    ui.label(format!("{xv:.3}"));
+                                }
                             }
                         }
                     });
+
+                    for series in &graph.series {
+                        row.col(|ui| {
+                            if sorted_row_idx < series.y.len() {
+                                let yv = series.y[sorted_row_idx];
+                                if yv.is_finite() {
+                                    ui.label(format!("{yv:.3}"));
+                                } else {
+                                    ui.label("-");
+                                }
+                            }
+                        });
+                    }
+                } else {
+                    // Slow path: unified X with HashMap lookups
+                    let xv = unified_x[sorted_row_idx];
+                    let x_bits = xv.to_bits();
+
+                    row.col(|ui| {
+                        if is_datetime {
+                            ui.label(datetime::format_timestamp(xv));
+                        } else {
+                            ui.label(format!("{xv:.3}"));
+                        }
+                    });
+
+                    for lookup in &lookups {
+                        row.col(|ui| {
+                            if let Some(&yv) = lookup.get(&x_bits) {
+                                if yv.is_finite() {
+                                    ui.label(format!("{yv:.3}"));
+                                } else {
+                                    ui.label("-");
+                                }
+                            }
+                        });
+                    }
                 }
             });
         });

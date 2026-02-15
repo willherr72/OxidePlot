@@ -3,13 +3,13 @@
 pub fn infer_unit(column_name: &str) -> String {
     let lower = column_name.to_lowercase();
 
-    if lower.contains("inc") || lower.contains("azi") || lower.contains("tool-face") || lower.contains("angle") {
+    if lower.contains("temp") {
+        "\u{00B0}C".to_string()
+    } else if lower.contains("inc") || lower.contains("azi") || lower.contains("tool-face") || lower.contains("angle") {
         "Degrees".to_string()
     } else if lower.contains("vibe") || lower.contains("accel") || lower.contains("shock")
         || lower.contains("gx") || lower.contains("gy") || lower.contains("gz") || lower.contains("grav") {
         "G".to_string()
-    } else if lower.contains("temp") {
-        "\u{00B0}C".to_string()
     } else if lower.contains("gamma") {
         "CPS".to_string()
     } else if lower.contains("pulse") || lower.contains("flow") {

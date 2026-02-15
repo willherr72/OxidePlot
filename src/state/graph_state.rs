@@ -20,22 +20,38 @@ pub enum CursorMode {
     Horizontal,
 }
 
+/// Maximum number of measurement cursors per plot.
+pub const MAX_CURSORS: usize = 4;
+
 /// State for measurement cursors on a 2D plot.
 #[derive(Debug, Clone)]
 pub struct CursorState {
     pub mode: CursorMode,
-    /// First cursor position (x for vertical, y for horizontal).
-    pub cursor1: Option<f64>,
-    /// Second cursor position.
-    pub cursor2: Option<f64>,
+    /// Cursor positions C1..C4 (x for vertical, y for horizontal).
+    pub positions: [Option<f64>; MAX_CURSORS],
+    /// Which slot the next right-click fills (cycles 0..MAX_CURSORS-1).
+    pub next_index: usize,
+}
+
+impl CursorState {
+    /// Reset all cursor positions and the placement index.
+    pub fn clear(&mut self) {
+        self.positions = [None; MAX_CURSORS];
+        self.next_index = 0;
+    }
+
+    /// Number of cursors currently placed.
+    pub fn placed_count(&self) -> usize {
+        self.positions.iter().filter(|p| p.is_some()).count()
+    }
 }
 
 impl Default for CursorState {
     fn default() -> Self {
         Self {
             mode: CursorMode::Off,
-            cursor1: None,
-            cursor2: None,
+            positions: [None; MAX_CURSORS],
+            next_index: 0,
         }
     }
 }
@@ -74,6 +90,8 @@ pub struct GraphState {
     pub x_axis_is_datetime: Option<bool>,
     pub x_axis_name: Option<String>,
     pub x_axis_unit: Option<String>,
+    pub y_axis_name: Option<String>,
+    pub z_axis_name: Option<String>,
     pub auto_scale_y: bool,
     pub y_axes: HashMap<String, AxisState>,
     pub sync_partner_ids: Vec<u64>,
@@ -116,6 +134,8 @@ impl GraphState {
             x_axis_is_datetime: None,
             x_axis_name: None,
             x_axis_unit: None,
+            y_axis_name: None,
+            z_axis_name: None,
             auto_scale_y: true,
             y_axes: HashMap::new(),
             sync_partner_ids: Vec::new(),

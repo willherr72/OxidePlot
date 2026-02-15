@@ -119,8 +119,14 @@ pub fn show_data_selection_dialog(
 
             ui.add_space(12.0);
 
-            // --- Y axis multi-selector ---
-            ui.label(egui::RichText::new("Y Axis (select one or more)").strong());
+            // --- Y axis selector ---
+            let is_3d = state.selected_z.is_some();
+            let y_label = if is_3d {
+                "Y Axis (select one)"
+            } else {
+                "Y Axis (select one or more)"
+            };
+            ui.label(egui::RichText::new(y_label).strong());
             ui.add_space(2.0);
 
             egui::Frame::group(ui.style())
@@ -129,11 +135,25 @@ pub fn show_data_selection_dialog(
                     egui::ScrollArea::vertical()
                         .max_height(200.0)
                         .show(ui, |ui| {
-                            for (i, &col_idx) in state.usable_columns.iter().enumerate() {
-                                ui.checkbox(
-                                    &mut state.selected_y[i],
-                                    &state.loaded_data.columns[col_idx],
-                                );
+                            if is_3d {
+                                // 3D mode: single Y selection via radio buttons.
+                                let current_y = state.selected_y.iter().position(|&s| s);
+                                for (i, &col_idx) in state.usable_columns.iter().enumerate() {
+                                    let selected = current_y == Some(i);
+                                    if ui.radio(selected, &state.loaded_data.columns[col_idx]).clicked() {
+                                        // Clear all, then set this one.
+                                        for s in state.selected_y.iter_mut() { *s = false; }
+                                        state.selected_y[i] = true;
+                                    }
+                                }
+                            } else {
+                                // 2D mode: multi-select via checkboxes.
+                                for (i, &col_idx) in state.usable_columns.iter().enumerate() {
+                                    ui.checkbox(
+                                        &mut state.selected_y[i],
+                                        &state.loaded_data.columns[col_idx],
+                                    );
+                                }
                             }
                         });
                 });
@@ -163,6 +183,13 @@ pub fn show_data_selection_dialog(
                                 &state.loaded_data.columns[col_idx],
                             ).clicked() {
                                 state.selected_z = Some(i);
+                                // Entering 3D mode: keep only the first
+                                // selected Y column.
+                                let first_y = state.selected_y.iter().position(|&s| s);
+                                for s in state.selected_y.iter_mut() { *s = false; }
+                                if let Some(idx) = first_y {
+                                    state.selected_y[idx] = true;
+                                }
                             }
                         }
                     });
@@ -172,6 +199,9 @@ pub fn show_data_selection_dialog(
 
             // --- OK / Cancel buttons ---
             let any_y_selected = state.selected_y.iter().any(|&s| s);
+            if !any_y_selected {
+                ui.label(egui::RichText::new("Select at least one Y column").weak());
+            }
             ui.horizontal(|ui| {
                 let ok_btn = ui.add_enabled(
                     any_y_selected,
@@ -201,10 +231,6 @@ pub fn show_data_selection_dialog(
 
                 if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(100.0, 32.0))).clicked() {
                     result = Some(DialogResult::Cancel);
-                }
-
-                if !any_y_selected {
-                    ui.label(egui::RichText::new("Select at least one Y column").weak());
                 }
             });
         });
