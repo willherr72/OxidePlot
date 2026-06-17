@@ -12,6 +12,7 @@ pub struct LoadedData {
 #[derive(serde::Serialize)]
 pub struct ColumnMeta {
     pub name: String,
+    pub kind: String,
 }
 
 #[derive(serde::Serialize)]
@@ -22,8 +23,22 @@ pub struct FileMeta {
 
 impl FileMeta {
     pub fn from_loaded(data: &LoadedData) -> Self {
+        let columns = data.columns.iter().zip(data.column_data.iter()).map(|(name, col)| {
+            let kind = if column_to_timestamps(col).is_some() {
+                "datetime".to_string()
+            } else {
+                let (_, frac) = column_to_f64(col);
+                if frac >= 0.5 {
+                    "numeric".to_string()
+                } else {
+                    "text".to_string()
+                }
+            };
+            ColumnMeta { name: name.clone(), kind }
+        }).collect();
+
         FileMeta {
-            columns: data.columns.iter().map(|n| ColumnMeta { name: n.clone() }).collect(),
+            columns,
             rows: data.row_count,
         }
     }
@@ -253,6 +268,42 @@ mod tests {
         assert_eq!(meta.columns.len(), 3);
         assert_eq!(meta.rows, 2);
         assert_eq!(meta.columns[0].name, "x");
+    }
+
+    #[test]
+    fn column_meta_kind_numeric() {
+        // time and temp are both numeric (0/1 and 20.0/21.5 parse as f64)
+        let csv = b"time,temp\n0,20.0\n1,21.5\n";
+        let d = load_from_bytes(csv, "x.csv").unwrap();
+        let meta = FileMeta::from_loaded(&d);
+        assert_eq!(meta.columns[0].name, "time");
+        assert_eq!(meta.columns[0].kind, "numeric");
+        assert_eq!(meta.columns[1].name, "temp");
+        assert_eq!(meta.columns[1].kind, "numeric");
+    }
+
+    #[test]
+    fn column_meta_kind_text() {
+        // label column has string values that cannot be parsed as numbers or dates
+        let csv = b"label,value\nalpha,1\nbeta,2\ngamma,3\n";
+        let d = load_from_bytes(csv, "x.csv").unwrap();
+        let meta = FileMeta::from_loaded(&d);
+        assert_eq!(meta.columns[0].name, "label");
+        assert_eq!(meta.columns[0].kind, "text");
+        assert_eq!(meta.columns[1].name, "value");
+        assert_eq!(meta.columns[1].kind, "numeric");
+    }
+
+    #[test]
+    fn column_meta_kind_datetime() {
+        // timestamp column should be detected as datetime
+        let csv = b"ts,val\n2024-01-01 00:00:00,10\n2024-01-02 00:00:00,20\n2024-01-03 00:00:00,30\n";
+        let d = load_from_bytes(csv, "x.csv").unwrap();
+        let meta = FileMeta::from_loaded(&d);
+        assert_eq!(meta.columns[0].name, "ts");
+        assert_eq!(meta.columns[0].kind, "datetime");
+        assert_eq!(meta.columns[1].name, "val");
+        assert_eq!(meta.columns[1].kind, "numeric");
     }
 
     #[test]

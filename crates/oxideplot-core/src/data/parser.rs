@@ -117,40 +117,14 @@ where
     detect_header_from_rows(&rows)
 }
 
-/// Detect header row index in an Excel file (path-based shim).
+/// Detect header row index in an Excel file (path-based shim — delegates to workbook variant).
 pub fn detect_excel_header(filepath: &Path, max_rows: usize) -> Result<usize, String> {
-    use calamine::{open_workbook_auto, Reader, Data};
+    use calamine::open_workbook_auto;
 
     let mut workbook = open_workbook_auto(filepath)
         .map_err(|e| format!("Cannot open Excel file: {e}"))?;
 
-    let sheet_name = workbook.sheet_names().first()
-        .ok_or("No sheets found")?
-        .clone();
-
-    let range = workbook.worksheet_range(&sheet_name)
-        .map_err(|e| format!("Cannot read sheet: {e}"))?;
-
-    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
-    for (i, row) in range.rows().enumerate() {
-        if i >= max_rows { break; }
-        let cells: Vec<Option<String>> = row.iter().map(|cell| {
-            match cell {
-                Data::Empty => None,
-                Data::String(s) => Some(s.clone()),
-                Data::Float(f) => Some(f.to_string()),
-                Data::Int(i) => Some(i.to_string()),
-                Data::Bool(b) => Some(b.to_string()),
-                Data::DateTime(dt) => Some(dt.to_string()),
-                Data::DateTimeIso(s) => Some(s.clone()),
-                Data::DurationIso(s) => Some(s.clone()),
-                Data::Error(e) => Some(format!("{e:?}")),
-            }
-        }).collect();
-        rows.push(cells);
-    }
-
-    detect_header_from_rows(&rows)
+    detect_excel_header_from_workbook(&mut workbook, max_rows)
 }
 
 /// Shared logic: given rows of optional-string cells, find the header row index.
