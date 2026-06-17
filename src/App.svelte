@@ -2,8 +2,9 @@
   import { onMount } from 'svelte';
   import { pickFile, readFile } from './lib/api.js';
   import { Renderer } from './lib/renderer.js';
-  import type { FileMeta, SeriesSpec } from './lib/renderer.js';
+  import type { FileMeta, SeriesSpec, AxisTicksData, ViewState } from './lib/renderer.js';
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
+  import Axes from './lib/overlay/Axes.svelte';
 
   let canvas: HTMLCanvasElement;
   const renderer = new Renderer();
@@ -12,6 +13,17 @@
   let filePath: string | null = null;
   let error: string | null = null;
   let loading = false;
+  let viewState: ViewState | null = null;
+  let ticks: AxisTicksData | null = null;
+
+  function refreshView() {
+    try {
+      viewState = renderer.viewState();
+      ticks = renderer.axisTicks();
+    } catch (_) {
+      // renderer not ready yet
+    }
+  }
 
   // ── Pan state ──────────────────────────────────────────────────────────────
   let dragging = false;
@@ -48,6 +60,7 @@
     lastPx = curX;
     lastPy = curY;
     renderer.pan(dx, dy);
+    refreshView();
   }
 
   function onPointerUp(_e: PointerEvent) {
@@ -67,10 +80,12 @@
     // Browser deltaY is negative when scrolling up (zoom in).
     // Core zoom uses: factor = (1 - scroll_y * 0.001); positive scroll_y → zoom in.
     renderer.zoom(-e.deltaY, ax, ay);
+    refreshView();
   }
 
   function onDblClick(_e: MouseEvent) {
     renderer.autoFit();
+    refreshView();
   }
 
   onMount(async () => {
@@ -78,6 +93,7 @@
       await renderer.init();
       await renderer.create(canvas);
       renderer.render(); // blank dark frame
+      refreshView();
     } catch (e) {
       error = String(e);
     }
@@ -91,6 +107,7 @@
           canvas.height = Math.round(height);
           renderer.resize(canvas.width, canvas.height);
           renderer.render();
+          refreshView();
         }
       }
     });
@@ -124,6 +141,7 @@
     error = null;
     try {
       renderer.setSeries(specs);
+      refreshView();
     } catch (e) {
       error = `Failed to render series: ${e}`;
     }
@@ -150,17 +168,25 @@
     {/if}
   </div>
 
-  <!-- Plot canvas — fills the remaining space -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <canvas
-    bind:this={canvas}
-    on:pointerdown={onPointerDown}
-    on:pointermove={onPointerMove}
-    on:pointerup={onPointerUp}
-    on:pointercancel={onPointerCancel}
-    on:wheel={onWheel}
-    on:dblclick={onDblClick}
-  ></canvas>
+  <!-- Plot canvas + axis overlay — fills the remaining space -->
+  <div class="canvas-wrap">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <canvas
+      bind:this={canvas}
+      on:pointerdown={onPointerDown}
+      on:pointermove={onPointerMove}
+      on:pointerup={onPointerUp}
+      on:pointercancel={onPointerCancel}
+      on:wheel={onWheel}
+      on:dblclick={onDblClick}
+    ></canvas>
+    <Axes
+      {ticks}
+      {viewState}
+      displayW={canvas ? canvas.getBoundingClientRect().width : 0}
+      displayH={canvas ? canvas.getBoundingClientRect().height : 0}
+    />
+  </div>
 
   <!-- Column-selection dialog -->
   {#if fileMeta}
@@ -239,12 +265,17 @@
     white-space: nowrap;
   }
 
+  .canvas-wrap {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+  }
+
   canvas {
     display: block;
-    flex: 1;
     width: 100%;
+    height: 100%;
     cursor: grab;
-    /* height is controlled by flex; the ResizeObserver keeps canvas px in sync */
   }
 
   canvas:active {

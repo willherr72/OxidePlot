@@ -17,6 +17,9 @@
 // Task 4.2 — viewport-aware downsampling.  Full source data is stored in
 // `sources: Vec<SourceSeries>` and `rebuild_visible()` re-runs LTTB over the
 // visible X-range on every pan/zoom/auto_fit, giving ~1 point per pixel.
+//
+// Task 4.3 — adds `x_is_time` field and `axis_ticks()` method for SVG tick
+// label overlay.  `set_series` now detects datetime X columns.
 
 use wasm_bindgen::prelude::*;
 
@@ -32,6 +35,8 @@ mod wasm_impl {
     use oxideplot_core::processing::downsampling::downsample_for_view;
     use oxideplot_core::state::plot_view::PlotViewState;
     use oxideplot_core::geom::{Pos2, Rect};
+    use oxideplot_core::render::axis::{compute_grid_lines, format_tick_value};
+    use oxideplot_core::data::datetime::format_timestamp;
 
     /// Minimum target point count when width is very small.
     const MIN_TARGET_POINTS: usize = 800;
@@ -63,6 +68,19 @@ mod wasm_impl {
         y_max: f64,
     }
 
+    #[derive(Serialize)]
+    struct TickEntry {
+        value: f64,
+        label: String,
+        major: bool,
+    }
+
+    #[derive(Serialize)]
+    struct AxisTicks {
+        x: Vec<TickEntry>,
+        y: Vec<TickEntry>,
+    }
+
     /// A GPU-accelerated 2D plot bound to an HTML canvas.
     ///
     /// Usage from JavaScript/TypeScript:
@@ -85,6 +103,8 @@ mod wasm_impl {
         loaded: Option<LoadedData>,
         /// Current view state (bounds + pan/zoom logic).
         view: PlotViewState,
+        /// True when the X axis contains datetime (Unix timestamp) data.
+        x_is_time: bool,
     }
 
     #[wasm_bindgen]
@@ -136,6 +156,7 @@ mod wasm_impl {
                 height,
                 loaded: None,
                 view: PlotViewState::default(),
+                x_is_time: false,
             }
         }
 
@@ -191,6 +212,7 @@ mod wasm_impl {
 
             let num_cols = data.columns.len();
             let mut new_sources: Vec<SourceSeries> = Vec::with_capacity(specs.len());
+            let mut x_is_time_any = false;
 
             for spec in &specs {
                 if spec.x_col >= num_cols || spec.y_col >= num_cols {
@@ -205,6 +227,7 @@ mod wasm_impl {
 
                 // Convert X: try datetime first, fall back to f64.
                 let x_vals: Vec<f64> = if let Some((ts, _)) = column_to_timestamps(x_col_data) {
+                    x_is_time_any = true;
                     ts
                 } else {
                     let (vals, _) = column_to_f64(x_col_data);
@@ -243,6 +266,7 @@ mod wasm_impl {
             }
 
             self.sources = new_sources;
+            self.x_is_time = x_is_time_any;
             // auto_fit computes bounds from source data, calls rebuild_visible + render.
             self.auto_fit();
             Ok(())
@@ -324,6 +348,54 @@ mod wasm_impl {
                 y_max: self.view.y_max,
             };
             serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL)
+        }
+
+        /// Return tick data for both axes as a JS object:
+        /// `{ x: [{value, label, major}], y: [{value, label, major}] }`
+        /// X labels use datetime format when x_is_time is true.
+        #[wasm_bindgen]
+        pub fn axis_ticks(&self) -> JsValue {
+            let x_lines = compute_grid_lines(self.view.x_min, self.view.x_max);
+            let y_lines = compute_grid_lines(self.view.y_min, self.view.y_max);
+
+            let x_span = self.view.x_max - self.view.x_min;
+
+            let x_ticks: Vec<TickEntry> = x_lines
+                .into_iter()
+                .map(|(val, major)| {
+                    let label = if self.x_is_time {
+                        // Shorten label based on visible span:
+                        // < 1 day (86400s): show only time portion
+                        // >= 1 day: show full datetime
+                        if x_span < 86400.0 {
+                            let full = format_timestamp(val);
+                            // Extract HH:MM:SS (chars 11..19)
+                            if full.len() >= 19 {
+                                full[11..19].to_string()
+                            } else {
+                                full
+                            }
+                        } else {
+                            format_timestamp(val)
+                        }
+                    } else {
+                        format_tick_value(val)
+                    };
+                    TickEntry { value: val, label, major }
+                })
+                .collect();
+
+            let y_ticks: Vec<TickEntry> = y_lines
+                .into_iter()
+                .map(|(val, major)| TickEntry {
+                    value: val,
+                    label: format_tick_value(val),
+                    major,
+                })
+                .collect();
+
+            let ticks = AxisTicks { x: x_ticks, y: y_ticks };
+            serde_wasm_bindgen::to_value(&ticks).unwrap_or(JsValue::NULL)
         }
 
         /// Render one frame: build draw calls from stored series, then present.

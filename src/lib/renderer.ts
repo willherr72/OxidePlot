@@ -35,6 +35,17 @@ export interface ViewState {
   y_max: number;
 }
 
+export interface TickEntry {
+  value: number;
+  label: string;
+  major: boolean;
+}
+
+export interface AxisTicksData {
+  x: TickEntry[];
+  y: TickEntry[];
+}
+
 /**
  * Wrapper around the WASM `OxidePlot` GPU renderer.
  *
@@ -132,6 +143,12 @@ export class Renderer {
   viewState(): ViewState {
     this.assertPlot();
     return this.plot!.view_state() as ViewState;
+  }
+
+  /** Return tick data for both axes as `{ x: [...], y: [...] }`. */
+  axisTicks(): AxisTicksData {
+    this.assertPlot();
+    return (this.plot as any).axis_ticks() as AxisTicksData;
   }
 
   private assertPlot(): void {
