@@ -9,23 +9,7 @@
    * pointer-events: none so all mouse events pass through to the canvas.
    */
 
-  export interface TickEntry {
-    value: number;
-    label: string;
-    major: boolean;
-  }
-
-  export interface AxisTicksData {
-    x: TickEntry[];
-    y: TickEntry[];
-  }
-
-  export interface ViewState {
-    x_min: number;
-    x_max: number;
-    y_min: number;
-    y_max: number;
-  }
+  import type { ViewState, AxisTicksData } from '../renderer.js';
 
   export let ticks: AxisTicksData | null = null;
   export let viewState: ViewState | null = null;

@@ -45,6 +45,7 @@
   // Track pointer-down CSS position for click-vs-drag discrimination
   let pointerDownCssX = 0;
   let pointerDownCssY = 0;
+  const CLICK_THRESHOLD_PX = 4;
 
   /** CSS-pixel → canvas-backing-pixel scale factors. */
   function pixelScale(): { sx: number; sy: number } {
@@ -89,7 +90,6 @@
 
     // Click-vs-drag: if movement in CSS px is below threshold AND cursorMode is on,
     // treat as a cursor placement click.
-    const CLICK_THRESHOLD_PX = 4;
     const rect = canvas.getBoundingClientRect();
     const upCssX = e.clientX - rect.left;
     const upCssY = e.clientY - rect.top;
@@ -98,9 +98,9 @@
     );
 
     if (cursorMode && moveDist < CLICK_THRESHOLD_PX && viewState) {
-      // Convert CSS px → data coordinates
-      const dataX = viewState.x_min + (upCssX / rect.width) * (viewState.x_max - viewState.x_min);
-      const dataY = viewState.y_min + (1 - upCssY / rect.height) * (viewState.y_max - viewState.y_min);
+      // Convert CSS px → data coordinates using pointer-DOWN position
+      const dataX = viewState.x_min + (pointerDownCssX / rect.width) * (viewState.x_max - viewState.x_min);
+      const dataY = viewState.y_min + (1 - pointerDownCssY / rect.height) * (viewState.y_max - viewState.y_min);
 
       if (cursors.length >= 2) {
         // Cycle: reset to a single new cursor

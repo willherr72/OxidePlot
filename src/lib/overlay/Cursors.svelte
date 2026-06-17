@@ -11,12 +11,7 @@
    * pointer-events: none so all mouse events pass through to the canvas.
    */
 
-  export interface ViewState {
-    x_min: number;
-    x_max: number;
-    y_min: number;
-    y_max: number;
-  }
+  import type { ViewState } from '../renderer.js';
 
   export interface CursorPoint {
     x: number;
