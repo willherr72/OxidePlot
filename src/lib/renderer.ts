@@ -3,6 +3,9 @@
  *
  * Task 3.3 — isolates all WASM imports so the rest of the app never touches
  * the raw WASM glue code.
+ *
+ * Task 4.1 — adds pan, zoom, autoFit, and viewState wrappers for interactive
+ * canvas-driven interaction.
  */
 
 import initWasm, { OxidePlot } from './wasm/oxideplot_wasm.js';
@@ -23,6 +26,13 @@ export interface SeriesSpec {
   y_col: number;
   color: [number, number, number, number];
   draw_mode: 'lines' | 'step' | 'points';
+}
+
+export interface ViewState {
+  x_min: number;
+  x_max: number;
+  y_min: number;
+  y_max: number;
 }
 
 /**
@@ -88,10 +98,40 @@ export class Renderer {
     this.plot!.resize(w, h);
   }
 
-  /** Auto-fit the view to encompass all series data. */
+  /**
+   * Auto-fit the view to encompass all series data and re-render.
+   * Delegates to `auto_fit` on the WASM side (which calls render internally).
+   */
   autoFit(): void {
     this.assertPlot();
     this.plot!.auto_fit();
+  }
+
+  /**
+   * Pan the view by a backing-store pixel delta and re-render.
+   * @param dx - horizontal drag delta in canvas backing-store pixels
+   * @param dy - vertical drag delta in canvas backing-store pixels
+   */
+  pan(dx: number, dy: number): void {
+    this.assertPlot();
+    this.plot!.pan(dx, dy);
+  }
+
+  /**
+   * Zoom around a screen-space anchor and re-render.
+   * @param scrollY - scroll magnitude; positive = zoom in.  Pass `-event.deltaY`.
+   * @param x - anchor X in canvas backing-store pixels
+   * @param y - anchor Y in canvas backing-store pixels
+   */
+  zoom(scrollY: number, x: number, y: number): void {
+    this.assertPlot();
+    this.plot!.zoom(scrollY, x, y);
+  }
+
+  /** Return the current view bounds as `{ x_min, x_max, y_min, y_max }`. */
+  viewState(): ViewState {
+    this.assertPlot();
+    return this.plot!.view_state() as ViewState;
   }
 
   private assertPlot(): void {

@@ -10,6 +10,9 @@
 // Task 3.3 — adds `set_series(specs_json)` and `auto_fit()`.  `set_series`
 // replaces the hard-coded demo with GPU series built from the loaded data.
 // `render()` now uses the stored view state instead of hard-coded bounds.
+//
+// Task 4.1 — adopts `PlotViewState` for the view, exposes `pan`, `zoom`,
+// and `view_state` for interactive canvas-driven interaction.
 
 use wasm_bindgen::prelude::*;
 
@@ -18,11 +21,13 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
     use super::*;
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
     use oxideplot_core::render::renderer::PlotRenderer;
     use oxideplot_core::data::loader::{LoadedData, FileMeta, load_from_bytes, column_to_f64, column_to_timestamps};
     use oxideplot_core::processing::downsampling::lttb_downsample;
+    use oxideplot_core::state::plot_view::PlotViewState;
+    use oxideplot_core::geom::{Pos2, Rect};
 
     /// Maximum points per series before LTTB downsampling kicks in.
     const MAX_SERIES_POINTS: usize = 2000;
@@ -34,6 +39,15 @@ mod wasm_impl {
         y_col: usize,
         color: [f32; 4],
         draw_mode: String,
+    }
+
+    /// Serialisable snapshot of the current view bounds, returned by `view_state`.
+    #[derive(Serialize)]
+    struct ViewSnapshot {
+        x_min: f64,
+        x_max: f64,
+        y_min: f64,
+        y_max: f64,
     }
 
     /// A GPU-accelerated 2D plot bound to an HTML canvas.
@@ -53,11 +67,8 @@ mod wasm_impl {
         height: u32,
         /// Parsed data stored here for set_series / series building.
         loaded: Option<LoadedData>,
-        /// Current view bounds in data coordinates.
-        view_x_min: f64,
-        view_x_max: f64,
-        view_y_min: f64,
-        view_y_max: f64,
+        /// Current view state (bounds + pan/zoom logic).
+        view: PlotViewState,
     }
 
     #[wasm_bindgen]
@@ -107,10 +118,7 @@ mod wasm_impl {
                 width,
                 height,
                 loaded: None,
-                view_x_min: 0.0,
-                view_x_max: 1.0,
-                view_y_min: 0.0,
-                view_y_max: 1.0,
+                view: PlotViewState::default(),
             }
         }
 
@@ -152,7 +160,7 @@ mod wasm_impl {
         /// ```
         /// `draw_mode` is one of `"lines"`, `"step"`, or `"points"`.
         ///
-        /// After building all series, `auto_fit` is called and the canvas is re-rendered.
+        /// After building all series, `auto_fit` is called (which renders).
         #[wasm_bindgen]
         pub fn set_series(&mut self, specs_json: String) -> Result<(), JsValue> {
             let data = self
@@ -230,12 +238,13 @@ mod wasm_impl {
             }
 
             self.series = new_series;
+            // auto_fit now calls render() internally.
             self.auto_fit();
-            self.render();
             Ok(())
         }
 
-        /// Auto-fit the view bounds to encompass all stored series with 5% padding.
+        /// Auto-fit the view bounds to encompass all stored series with 5% padding,
+        /// then re-render.
         #[wasm_bindgen]
         pub fn auto_fit(&mut self) {
             if self.series.is_empty() {
@@ -269,10 +278,46 @@ mod wasm_impl {
             let x_pad = ((x_max - x_min) * 0.05).max(1e-9);
             let y_pad = ((y_max - y_min) * 0.05).max(1e-9);
 
-            self.view_x_min = x_min - x_pad;
-            self.view_x_max = x_max + x_pad;
-            self.view_y_min = y_min - y_pad;
-            self.view_y_max = y_max + y_pad;
+            self.view.x_min = x_min - x_pad;
+            self.view.x_max = x_max + x_pad;
+            self.view.y_min = y_min - y_pad;
+            self.view.y_max = y_max + y_pad;
+            self.view.auto_fit = false;
+            self.view.initialized = true;
+
+            self.render();
+        }
+
+        /// Pan the view by a pixel drag delta (backing-store pixels) and re-render.
+        #[wasm_bindgen]
+        pub fn pan(&mut self, dx_px: f32, dy_px: f32) {
+            let rect = self.canvas_rect();
+            self.view.pan(dx_px, dy_px, rect);
+            self.render();
+        }
+
+        /// Zoom around a screen-space anchor (backing-store pixels) and re-render.
+        ///
+        /// `scroll_y` follows the sign convention: positive = zoom in (scroll up).
+        /// Pass `-event.deltaY` from the browser `wheel` event.
+        #[wasm_bindgen]
+        pub fn zoom(&mut self, scroll_y: f32, anchor_x: f32, anchor_y: f32) {
+            let anchor = Pos2 { x: anchor_x, y: anchor_y };
+            let rect = self.canvas_rect();
+            self.view.zoom(scroll_y, anchor, rect);
+            self.render();
+        }
+
+        /// Return current view bounds as a JS object `{ x_min, x_max, y_min, y_max }`.
+        #[wasm_bindgen]
+        pub fn view_state(&self) -> JsValue {
+            let snapshot = ViewSnapshot {
+                x_min: self.view.x_min,
+                x_max: self.view.x_max,
+                y_min: self.view.y_min,
+                y_max: self.view.y_max,
+            };
+            serde_wasm_bindgen::to_value(&snapshot).unwrap_or(JsValue::NULL)
         }
 
         /// Render one frame: build draw calls from stored series, then present.
@@ -297,8 +342,8 @@ mod wasm_impl {
             }
 
             let uniforms = PlotUniforms {
-                view_min: [self.view_x_min as f32, self.view_y_min as f32],
-                view_max: [self.view_x_max as f32, self.view_y_max as f32],
+                view_min: [self.view.x_min as f32, self.view.y_min as f32],
+                view_max: [self.view.x_max as f32, self.view.y_max as f32],
                 resolution: [self.width as f32, self.height as f32],
                 line_width: 2.0,
                 point_radius: 3.0,
@@ -319,6 +364,18 @@ mod wasm_impl {
             self.width = w;
             self.height = h;
             self.renderer.resize(w, h);
+        }
+
+        // ── Private helpers ───────────────────────────────────────────────────
+
+        /// Build a canvas-sized Rect (backing-store pixels, origin at top-left).
+        fn canvas_rect(&self) -> Rect {
+            Rect {
+                left: 0.0,
+                top: 0.0,
+                width: self.width as f32,
+                height: self.height as f32,
+            }
         }
     }
 }

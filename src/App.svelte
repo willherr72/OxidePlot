@@ -13,6 +13,65 @@
   let error: string | null = null;
   let loading = false;
 
+  // ── Pan state ──────────────────────────────────────────────────────────────
+  let dragging = false;
+  let lastPx = 0;
+  let lastPy = 0;
+
+  /** CSS-pixel → canvas-backing-pixel scale factors. */
+  function pixelScale(): { sx: number; sy: number } {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      sx: canvas.width / rect.width,
+      sy: canvas.height / rect.height,
+    };
+  }
+
+  function onPointerDown(e: PointerEvent) {
+    dragging = true;
+    const { sx, sy } = pixelScale();
+    const rect = canvas.getBoundingClientRect();
+    lastPx = (e.clientX - rect.left) * sx;
+    lastPy = (e.clientY - rect.top) * sy;
+    canvas.setPointerCapture(e.pointerId);
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    if (!dragging) return;
+    const { sx, sy } = pixelScale();
+    const rect = canvas.getBoundingClientRect();
+    const curX = (e.clientX - rect.left) * sx;
+    const curY = (e.clientY - rect.top) * sy;
+    const dx = curX - lastPx;
+    const dy = curY - lastPy;
+    lastPx = curX;
+    lastPy = curY;
+    renderer.pan(dx, dy);
+  }
+
+  function onPointerUp(_e: PointerEvent) {
+    dragging = false;
+  }
+
+  function onPointerCancel(_e: PointerEvent) {
+    dragging = false;
+  }
+
+  function onWheel(e: WheelEvent) {
+    e.preventDefault();
+    const { sx, sy } = pixelScale();
+    const rect = canvas.getBoundingClientRect();
+    const ax = (e.clientX - rect.left) * sx;
+    const ay = (e.clientY - rect.top) * sy;
+    // Browser deltaY is negative when scrolling up (zoom in).
+    // Core zoom uses: factor = (1 - scroll_y * 0.001); positive scroll_y → zoom in.
+    renderer.zoom(-e.deltaY, ax, ay);
+  }
+
+  function onDblClick(_e: MouseEvent) {
+    renderer.autoFit();
+  }
+
   onMount(async () => {
     try {
       await renderer.init();
@@ -91,7 +150,16 @@
   </div>
 
   <!-- Plot canvas — fills the remaining space -->
-  <canvas bind:this={canvas}></canvas>
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <canvas
+    bind:this={canvas}
+    on:pointerdown={onPointerDown}
+    on:pointermove={onPointerMove}
+    on:pointerup={onPointerUp}
+    on:pointercancel={onPointerCancel}
+    on:wheel={onWheel}
+    on:dblclick={onDblClick}
+  ></canvas>
 
   <!-- Column-selection dialog -->
   {#if fileMeta}
@@ -174,6 +242,11 @@
     display: block;
     flex: 1;
     width: 100%;
+    cursor: grab;
     /* height is controlled by flex; the ResizeObserver keeps canvas px in sync */
+  }
+
+  canvas:active {
+    cursor: grabbing;
   }
 </style>
