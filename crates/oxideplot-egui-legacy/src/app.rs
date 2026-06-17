@@ -500,8 +500,8 @@ impl eframe::App for OxidePlotApp {
                     .and_then(|g| g.last_frame_rect);
 
                 let (rgba, width, height) = if let Some(rect) = crop_rect {
-                    let x0 = ((rect.left() * ppp) as usize).min(full_w);
-                    let y0 = ((rect.top() * ppp) as usize).min(color_image.height());
+                    let x0 = ((rect.left * ppp) as usize).min(full_w);
+                    let y0 = ((rect.top * ppp) as usize).min(color_image.height());
                     let x1 = ((rect.right() * ppp).ceil() as usize).min(full_w);
                     let y1 = ((rect.bottom() * ppp).ceil() as usize).min(color_image.height());
                     let cw = x1.saturating_sub(x0);
@@ -740,7 +740,7 @@ impl eframe::App for OxidePlotApp {
                 let mut graph_reorder: Option<(usize, usize)> = None;
                 if egui::DragAndDrop::has_any_payload(ui.ctx()) {
                     // Collect rects first to avoid borrow conflicts
-                    let rects: Vec<(usize, Option<egui::Rect>)> = graph_ids
+                    let rects: Vec<(usize, Option<oxideplot_core::geom::Rect>)> = graph_ids
                         .iter()
                         .enumerate()
                         .map(|(idx, &gid)| {
@@ -751,8 +751,9 @@ impl eframe::App for OxidePlotApp {
 
                     for (idx, rect) in &rects {
                         if let Some(rect) = rect {
+                            let egui_rect = egui::Rect::from_min_size(egui::pos2(rect.left, rect.top), egui::vec2(rect.width, rect.height));
                             let drop_resp = ui.interact(
-                                *rect,
+                                egui_rect,
                                 egui::Id::new("graph_drop").with(idx),
                                 egui::Sense::hover(),
                             );
@@ -760,7 +761,7 @@ impl eframe::App for OxidePlotApp {
                             // Shared logic for hover indicator and drop
                             let compute_target = |resp: &egui::Response, from: usize| -> Option<usize> {
                                 let top_half = resp.hover_pos()
-                                    .map_or(false, |p| p.y < rect.center().y);
+                                    .map_or(false, |p| p.y < rect.top + rect.height / 2.0);
                                 let to = if top_half { *idx } else { idx + 1 };
                                 // Skip no-ops: inserting at `from` or `from+1` results in same position
                                 if to == from || to == from + 1 { None } else { Some(to) }
@@ -768,9 +769,9 @@ impl eframe::App for OxidePlotApp {
 
                             if let Some(payload) = drop_resp.dnd_hover_payload::<usize>() {
                                 if let Some(to) = compute_target(&drop_resp, *payload) {
-                                    let y = if to <= *idx { rect.top() } else { rect.bottom() };
+                                    let y = if to <= *idx { rect.top } else { rect.bottom() };
                                     ui.painter().hline(
-                                        rect.x_range(),
+                                        rect.left..=rect.right(),
                                         y,
                                         egui::Stroke::new(3.0, egui::Color32::from_rgb(80, 140, 255)),
                                     );
@@ -811,7 +812,7 @@ impl eframe::App for OxidePlotApp {
                     self.state
                         .graphs
                         .iter()
-                        .find(|g| g.last_frame_rect.map_or(false, |r| r.contains(pos)))
+                        .find(|g| g.last_frame_rect.map_or(false, |r| r.left <= pos.x && pos.x <= r.right() && r.top <= pos.y && pos.y <= r.bottom()))
                         .map(|g| g.id)
                         .or_else(|| {
                             // Fallback: find the graph whose rect centre is
@@ -822,7 +823,7 @@ impl eframe::App for OxidePlotApp {
                                 .iter()
                                 .filter_map(|g| {
                                     g.last_frame_rect
-                                        .map(|r| (g.id, (r.center().y - pos.y).abs()))
+                                        .map(|r| (g.id, (r.top + r.height / 2.0 - pos.y).abs()))
                                 })
                                 .min_by(|a, b| a.1.total_cmp(&b.1))
                                 .map(|(id, _)| id)

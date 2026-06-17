@@ -6,7 +6,9 @@ use crate::state::theme::Theme;
 use crate::render::gpu_plot::create_plot_paint_callback;
 use crate::render::gpu_types::{DrawMode, GridGpuData, Line3DData, PlotUniforms, Scatter3DData, SeriesGpuData};
 use crate::render::plot_interaction;
+use crate::render::plot_interaction::PlotViewStateExt;
 use crate::plot3d::renderer::create_3d_paint_callback;
+use crate::plot3d::camera::OrbitalCameraExt;
 
 /// Actions that the graph panel can request from the parent.
 pub enum GraphAction {
@@ -136,7 +138,7 @@ pub fn show_graph_panel(
                         graph.remove_series_selected.resize(graph.series.len(), false);
                     }
                     for (i, series) in graph.series.iter().enumerate() {
-                        let color = series.color32();
+                        let color = egui::Color32::from_rgba_unmultiplied(series.color[0], series.color[1], series.color[2], series.color[3]);
                         ui.checkbox(
                             &mut graph.remove_series_selected[i],
                             egui::RichText::new(&series.label).color(color),
@@ -284,7 +286,8 @@ pub fn show_graph_panel(
             ui.allocate_space(egui::vec2(ui.available_width(), target - used));
         }
     });
-    graph.last_frame_rect = Some(frame_resp.response.rect);
+    let r = frame_resp.response.rect;
+    graph.last_frame_rect = Some(oxideplot_core::geom::Rect { left: r.min.x, top: r.min.y, width: r.width(), height: r.height() });
 
     action
 }
@@ -1131,7 +1134,7 @@ fn draw_legend(painter: &egui::Painter, graph: &GraphState, plot_rect: egui::Rec
         if !series.visible {
             continue;
         }
-        let color = series.color32();
+        let color = egui::Color32::from_rgba_unmultiplied(series.color[0], series.color[1], series.color[2], series.color[3]);
 
         // Color swatch
         let swatch_rect = egui::Rect::from_min_size(
@@ -1219,7 +1222,7 @@ fn draw_hover_tooltip(
                         best_x = xv;
                         best_y_display = series.y[i]; // real value for display
                         best_screen_pos = pv.data_to_screen(xv, yv_norm, plot_rect);
-                        best_color = series.color32();
+                        best_color = egui::Color32::from_rgba_unmultiplied(series.color[0], series.color[1], series.color[2], series.color[3]);
                     }
                 }
             }
@@ -1239,7 +1242,7 @@ fn draw_hover_tooltip(
                     best_x = xv;
                     best_y_display = yv;
                     best_screen_pos = pv.data_to_screen(xv, yv, plot_rect);
-                    best_color = series.color32();
+                    best_color = egui::Color32::from_rgba_unmultiplied(series.color[0], series.color[1], series.color[2], series.color[3]);
                 }
             }
         }

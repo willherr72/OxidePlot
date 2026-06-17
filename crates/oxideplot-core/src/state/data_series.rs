@@ -142,10 +142,6 @@ impl DataSeries {
         !self.z.is_empty()
     }
 
-    pub fn color32(&self) -> egui::Color32 {
-        egui::Color32::from_rgba_unmultiplied(self.color[0], self.color[1], self.color[2], self.color[3])
-    }
-
     pub fn point_count(&self) -> usize {
         self.x.len()
     }

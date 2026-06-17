@@ -210,7 +210,7 @@ pub fn show_settings_dialog(
                             ui.add_space(2.0);
                             ui.horizontal_wrapped(|ui| {
                                 for (i, series) in graph.series.iter().enumerate() {
-                                    let color = series.color32();
+                                    let color = egui::Color32::from_rgba_unmultiplied(series.color[0], series.color[1], series.color[2], series.color[3]);
                                     ui.checkbox(
                                         &mut state.selected_series[i],
                                         egui::RichText::new(&series.label).color(color),

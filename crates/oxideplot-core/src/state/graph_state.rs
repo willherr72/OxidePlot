@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use eframe::egui;
 use serde::{Deserialize, Serialize};
 use crate::state::data_series::{DataSeries, PlotMode, color_for_index};
-use crate::render::plot_interaction::PlotViewState;
-use crate::plot3d::camera::OrbitalCamera;
+use crate::state::plot_view::PlotViewState;
+use crate::state::orbital_camera::OrbitalCamera;
 
 /// Direction for table column sorting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +120,7 @@ pub struct GraphState {
     pub remove_series_selected: Vec<bool>,
     /// Screen rect of the graph panel (set each frame for screenshot cropping).
     #[serde(skip)]
-    pub last_frame_rect: Option<egui::Rect>,
+    pub last_frame_rect: Option<crate::geom::Rect>,
 }
 
 impl GraphState {

@@ -4270,6 +4270,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideplot-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "calamine",
+ "chrono",
+ "csv",
+ "glam",
+ "kiddo",
+ "serde",
+ "wgpu",
+]
+
+[[package]]
 name = "oxideplot-egui-legacy"
 version = "0.1.0"
 dependencies = [
@@ -4285,6 +4299,7 @@ dependencies = [
  "glam",
  "image",
  "kiddo",
+ "oxideplot-core",
  "rfd",
  "serde",
  "serde_json",

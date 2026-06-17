@@ -1,4 +1,4 @@
 pub mod app_state;
-pub mod graph_state;
-pub mod data_series;
 pub mod theme;
+pub use oxideplot_core::state::data_series;
+pub use oxideplot_core::state::graph_state;
