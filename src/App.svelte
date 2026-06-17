@@ -1,89 +1,104 @@
 <script lang="ts">
-  import svelteLogo from './assets/svelte.svg'
-  import viteLogo from './assets/vite.svg'
-  import heroImg from './assets/hero.png'
-  import Counter from './lib/Counter.svelte'
+  import { onMount } from 'svelte';
+  import { runTriangle } from './lib/spike/webgpu_triangle';
+  import init, { run_triangle } from './lib/wasm/oxideplot_wasm.js';
+  import wasmUrl from './lib/wasm/oxideplot_wasm_bg.wasm?url';
+
+  let tsCanvas: HTMLCanvasElement;
+  let wasmCanvas: HTMLCanvasElement;
+
+  let tsStatus = 'running…';
+  let wasmStatus = 'running…';
+
+  onMount(async () => {
+    // --- Task 0.2: TypeScript WebGPU triangle ---
+    try {
+      tsStatus = await runTriangle(tsCanvas);
+    } catch (e: unknown) {
+      tsStatus = `TS_ERROR: ${e instanceof Error ? e.message : String(e)}`;
+    }
+
+    // --- Task 0.3: Rust/wgpu-on-wasm triangle ---
+    try {
+      await init({ module_or_path: wasmUrl });
+      wasmStatus = await run_triangle(wasmCanvas);
+    } catch (e: unknown) {
+      wasmStatus = `WASM_ERROR: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  });
 </script>
 
-<section id="center">
-  <div class="hero">
-    <img src={heroImg} class="base" width="170" height="179" alt="" />
-    <img src={svelteLogo} class="framework" alt="Svelte logo" />
-    <img src={viteLogo} class="vite" alt="Vite logo" />
-  </div>
-  <div>
-    <h1>Get started</h1>
-    <p>Edit <code>src/App.svelte</code> and save to test <code>HMR</code></p>
-  </div>
-  <Counter />
-</section>
+<main>
+  <h1>OxidePlot — Phase 0 WebGPU Spike</h1>
 
-<div class="ticks"></div>
+  <section class="probe">
+    <h2>Probe 1 — TypeScript WebGPU</h2>
+    <canvas bind:this={tsCanvas} width="640" height="480"></canvas>
+    <p class="status" data-status={tsStatus}>TS WebGPU: {tsStatus}</p>
+  </section>
 
-<section id="next-steps">
-  <div id="docs">
-    <svg class="icon" role="presentation" aria-hidden="true">
-      <use href="/icons.svg#documentation-icon"></use>
-    </svg>
-    <h2>Documentation</h2>
-    <p>Your questions, answered</p>
-    <ul>
-      <li>
-        <a href="https://vite.dev/" target="_blank" rel="noreferrer">
-          <img class="logo" src={viteLogo} alt="" />
-          Explore Vite
-        </a>
-      </li>
-      <li>
-        <a href="https://svelte.dev/" target="_blank" rel="noreferrer">
-          <img class="button-icon" src={svelteLogo} alt="" />
-          Learn more
-        </a>
-      </li>
-    </ul>
-  </div>
-  <div id="social">
-    <svg class="icon" role="presentation" aria-hidden="true">
-      <use href="/icons.svg#social-icon"></use>
-    </svg>
-    <h2>Connect with us</h2>
-    <p>Join the Vite community</p>
-    <ul>
-      <li>
-        <a href="https://github.com/vitejs/vite" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#github-icon"></use>
-          </svg>
-          GitHub
-        </a>
-      </li>
-      <li>
-        <a href="https://chat.vite.dev/" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#discord-icon"></use>
-          </svg>
-          Discord
-        </a>
-      </li>
-      <li>
-        <a href="https://x.com/vite_js" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#x-icon"></use>
-          </svg>
-          X.com
-        </a>
-      </li>
-      <li>
-        <a href="https://bsky.app/profile/vite.dev" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#bluesky-icon"></use>
-          </svg>
-          Bluesky
-        </a>
-      </li>
-    </ul>
-  </div>
-</section>
+  <section class="probe">
+    <h2>Probe 2 — Rust/wgpu → WASM</h2>
+    <canvas bind:this={wasmCanvas} width="640" height="480"></canvas>
+    <p class="status" data-status={wasmStatus}>WASM WebGPU: {wasmStatus}</p>
+  </section>
+</main>
 
-<div class="ticks"></div>
-<section id="spacer"></section>
+<style>
+  main {
+    font-family: system-ui, sans-serif;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 2rem;
+    background: #0d0d0d;
+    min-height: 100vh;
+    color: #e0e0e0;
+  }
+
+  h1 {
+    font-size: 2rem;
+    margin-bottom: 2rem;
+    color: #fff;
+  }
+
+  .probe {
+    margin-bottom: 3rem;
+  }
+
+  h2 {
+    font-size: 1.4rem;
+    margin-bottom: 1rem;
+    color: #aaa;
+  }
+
+  canvas {
+    display: block;
+    border: 2px solid #444;
+    background: #000;
+    max-width: 100%;
+  }
+
+  .status {
+    margin-top: 0.75rem;
+    font-size: 2.5rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    font-family: monospace;
+    color: #ff0;
+  }
+
+  /* Green when OK, red when not */
+  .status[data-status="WEBGPU_OK"],
+  .status[data-status="WASM_WEBGPU_OK"] {
+    color: #0f0;
+  }
+  .status[data-status^="NO_"],
+  .status[data-status^="WASM_NO_"],
+  .status[data-status^="TS_ERROR"],
+  .status[data-status^="WASM_ERROR"],
+  .status[data-status^="WASM_SURFACE_ERR"],
+  .status[data-status^="WASM_DEVICE_ERR"],
+  .status[data-status^="WASM_FRAME_ERR"] {
+    color: #f44;
+  }
+</style>
