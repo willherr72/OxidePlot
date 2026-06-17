@@ -36,7 +36,10 @@
   const MAJOR_TICK_LEN = 8;
   const MINOR_TICK_LEN = 4;
   const FONT_SIZE = 11;
-  const LABEL_OFFSET_X = 14; // px below the bottom tick
+  // Axis labels render INSIDE the plot near the edges (there is no reserved
+  // gutter; `.canvas-wrap` clips anything outside the canvas box). X labels sit
+  // just above the bottom tick marks; Y labels just right of the left ticks.
+  const X_LABEL_GAP = 3;     // px above the major X tick marks
   const LABEL_OFFSET_Y = 4;  // px right of the left tick
 
   // Margin: leave some room so labels at edges aren't clipped
@@ -105,7 +108,7 @@
     {#if tick.major}
       <text
         x={px}
-        y={displayH - MAJOR_TICK_LEN - LABEL_OFFSET_X + FONT_SIZE}
+        y={displayH - MAJOR_TICK_LEN - X_LABEL_GAP}
         text-anchor="middle"
         font-size={FONT_SIZE}
         fill="rgba(200,200,220,0.9)"
