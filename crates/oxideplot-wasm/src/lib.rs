@@ -44,10 +44,20 @@ mod wasm_impl {
     /// Full source data for one series, stored before any downsampling.
     /// xs must be in ascending order (standard time-series assumption).
     struct SourceSeries {
+        name: String,
+        visible: bool,
         xs: Vec<f64>,
         ys: Vec<f64>,
         color: [f32; 4],
         draw_mode: DrawMode,
+    }
+
+    /// Serialisable info about one series, returned by `series_info`.
+    #[derive(Serialize)]
+    struct SeriesInfo {
+        name: String,
+        color: [f32; 4],
+        visible: bool,
     }
 
     /// JSON spec for one series passed in from JS via `set_series`.
@@ -257,7 +267,10 @@ mod wasm_impl {
 
                 // Store FULL source data — no downsampling here.
                 // rebuild_visible() will LTTB-downsample to the visible range.
+                let name = data.columns[spec.y_col].clone();
                 new_sources.push(SourceSeries {
+                    name,
+                    visible: true,
                     xs,
                     ys,
                     color: spec.color,
@@ -467,6 +480,60 @@ mod wasm_impl {
             self.render();
         }
 
+        // ── Series management ─────────────────────────────────────────────────
+
+        /// Return an array of `{ name, color, visible }` objects (one per source
+        /// series, in render order) so the frontend can build a series legend.
+        #[wasm_bindgen]
+        pub fn series_info(&self) -> JsValue {
+            let info: Vec<SeriesInfo> = self
+                .sources
+                .iter()
+                .map(|src| SeriesInfo {
+                    name: src.name.clone(),
+                    color: src.color,
+                    visible: src.visible,
+                })
+                .collect();
+            serde_wasm_bindgen::to_value(&info).unwrap_or(JsValue::NULL)
+        }
+
+        /// Toggle the visibility of the series at `index` and re-render.
+        #[wasm_bindgen]
+        pub fn set_series_visible(&mut self, index: usize, visible: bool) {
+            if index >= self.sources.len() {
+                return;
+            }
+            self.sources[index].visible = visible;
+            self.rebuild_visible();
+            self.render();
+        }
+
+        /// Remove the series at `index` and re-render.
+        #[wasm_bindgen]
+        pub fn remove_series(&mut self, index: usize) {
+            if index >= self.sources.len() {
+                return;
+            }
+            self.sources.remove(index);
+            self.rebuild_visible();
+            self.render();
+        }
+
+        /// Move the series at `from` to position `to`, shifting others, and re-render.
+        /// This changes z-order: later indices render on top.
+        #[wasm_bindgen]
+        pub fn move_series(&mut self, from: usize, to: usize) {
+            let n = self.sources.len();
+            if from >= n || to >= n {
+                return;
+            }
+            let src = self.sources.remove(from);
+            self.sources.insert(to, src);
+            self.rebuild_visible();
+            self.render();
+        }
+
         // ── Private helpers ───────────────────────────────────────────────────
 
         /// Rebuild `self.series` by LTTB-downsampling each source series to the
@@ -491,6 +558,19 @@ mod wasm_impl {
                 .sources
                 .iter()
                 .map(|src| {
+                    // Invisible series get an empty SeriesGpuData so self.series
+                    // stays index-aligned with self.sources; build_draw_calls
+                    // skips empty point buffers.
+                    if !src.visible {
+                        return SeriesGpuData {
+                            points: vec![],
+                            color: src.color,
+                            line_width: 2.0,
+                            point_radius: 3.0,
+                            draw_mode: src.draw_mode,
+                        };
+                    }
+
                     let (vis_x, vis_y) =
                         downsample_for_view(&src.xs, &src.ys, x_min, x_max, target);
 

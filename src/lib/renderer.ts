@@ -35,6 +35,12 @@ export interface ViewState {
   y_max: number;
 }
 
+export interface SeriesInfoEntry {
+  name: string;
+  color: [number, number, number, number];
+  visible: boolean;
+}
+
 export interface TickEntry {
   value: number;
   label: string;
@@ -158,6 +164,38 @@ export class Renderer {
   setDrawMode(mode: 'lines' | 'step' | 'points'): void {
     this.assertPlot();
     this.plot!.set_draw_mode(mode);
+  }
+
+  /**
+   * Return an array of `{ name, color, visible }` for each series in render order.
+   */
+  seriesInfo(): SeriesInfoEntry[] {
+    this.assertPlot();
+    return (this.plot as any).series_info() as SeriesInfoEntry[];
+  }
+
+  /**
+   * Set the visibility of a series by index and re-render.
+   */
+  setSeriesVisible(index: number, visible: boolean): void {
+    this.assertPlot();
+    (this.plot as any).set_series_visible(index, visible);
+  }
+
+  /**
+   * Remove the series at `index` and re-render.
+   */
+  removeSeries(index: number): void {
+    this.assertPlot();
+    (this.plot as any).remove_series(index);
+  }
+
+  /**
+   * Move the series at `from` to position `to` (reorders z-order) and re-render.
+   */
+  moveSeries(from: number, to: number): void {
+    this.assertPlot();
+    (this.plot as any).move_series(from, to);
   }
 
   private assertPlot(): void {

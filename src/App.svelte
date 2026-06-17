@@ -2,8 +2,9 @@
   import { onMount } from 'svelte';
   import { pickFile, readFile } from './lib/api.js';
   import { Renderer } from './lib/renderer.js';
-  import type { FileMeta, SeriesSpec, AxisTicksData, ViewState } from './lib/renderer.js';
+  import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from './lib/renderer.js';
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
+  import SeriesList from './lib/components/SeriesList.svelte';
   import Axes from './lib/overlay/Axes.svelte';
   import Cursors from './lib/overlay/Cursors.svelte';
   import type { CursorPoint } from './lib/overlay/Cursors.svelte';
@@ -17,6 +18,7 @@
   let loading = false;
   let viewState: ViewState | null = null;
   let ticks: AxisTicksData | null = null;
+  let seriesInfo: SeriesInfoEntry[] = [];
 
   function refreshView() {
     try {
@@ -25,6 +27,19 @@
     } catch (_) {
       // renderer not ready yet
     }
+  }
+
+  function refreshSeriesInfo() {
+    try {
+      seriesInfo = renderer.seriesInfo();
+    } catch (_) {
+      seriesInfo = [];
+    }
+  }
+
+  function handleSeriesChange() {
+    refreshSeriesInfo();
+    refreshView();
   }
 
   // ── Draw mode ──────────────────────────────────────────────────────────────
@@ -208,6 +223,7 @@
       hasData = true;
       drawMode = 'lines'; // reset to default on new data load
       refreshView();
+      refreshSeriesInfo();
     } catch (e) {
       error = `Failed to render series: ${e}`;
     }
@@ -283,6 +299,13 @@
       displayW={canvas ? canvas.getBoundingClientRect().width : 0}
       displayH={canvas ? canvas.getBoundingClientRect().height : 0}
     />
+    {#if seriesInfo.length > 0}
+      <SeriesList
+        series={seriesInfo}
+        {renderer}
+        on:change={handleSeriesChange}
+      />
+    {/if}
   </div>
 
   <!-- Column-selection dialog -->
