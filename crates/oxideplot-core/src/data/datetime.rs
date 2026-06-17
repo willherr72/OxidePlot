@@ -192,16 +192,19 @@ mod tests {
     #[test]
     fn rejects_empty_string_for_rfc3339_format() {
         let result = parse_to_timestamp("", RFC3339_FORMAT);
-        assert!(result.is_none());
+        assert!(result.is_none(), "expected None for empty string, got {result:?}");
     }
 
     #[test]
-    fn parses_naive_datetime_format() {
-        // Parse with an explicit format (no timezone).
-        let fmt = "%Y-%m-%d %H:%M:%S";
+    fn parses_naive_datetime_via_detected_format() {
+        // Source the format from detect_date_format (not a hardcoded literal) so this
+        // also characterizes detection of a naive, timezone-less datetime and stays
+        // correct if DATE_FORMATS is reordered.
+        let samples = vec!["2024-02-10 14:30:00".to_string()];
+        let fmt = detect_date_format(&samples).expect("should detect naive datetime format");
         let ts = parse_to_timestamp("2024-02-10 14:30:00", fmt)
             .expect("should parse naive datetime");
-        assert!(ts > 0.0);
+        assert!(ts > 0.0, "expected positive epoch seconds, got {ts}");
     }
 
     #[test]
