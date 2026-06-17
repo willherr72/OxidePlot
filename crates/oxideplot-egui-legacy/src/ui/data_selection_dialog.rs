@@ -1,4 +1,4 @@
-use crate::data::loader::LoadedData;
+use oxideplot_core::data::loader::LoadedData;
 
 /// State for the data selection dialog, created when the user loads a file
 /// and needs to choose which columns to plot.

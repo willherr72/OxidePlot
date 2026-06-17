@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+oxideplot-core = { path = "../oxideplot-core" }
 eframe = { version = "0.31", features = ["wgpu"] }
 egui = "0.31"
 egui_extras = { version = "0.31", features = ["datepicker"] }

@@ -161,3 +161,67 @@ pub fn format_timestamp(ts: f64) -> String {
         None => format!("{ts:.3}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_rfc3339_returns_positive_timestamp() {
+        // RFC 3339 string with Z timezone: parse_to_timestamp should return the Unix epoch seconds.
+        let ts = parse_to_timestamp("2024-02-10T14:30:00Z", RFC3339_FORMAT)
+            .expect("should parse a valid RFC 3339 timestamp");
+        // 2024-02-10 is well after Unix epoch (Jan 1 1970), so timestamp must be positive.
+        assert!(ts > 0.0, "expected positive epoch seconds, got {ts}");
+    }
+
+    #[test]
+    fn parses_rfc3339_known_epoch_seconds() {
+        // 1970-01-01T00:00:00Z is Unix epoch 0.
+        let ts = parse_to_timestamp("1970-01-01T00:00:00Z", RFC3339_FORMAT)
+            .expect("should parse Unix epoch");
+        assert_eq!(ts, 0.0);
+    }
+
+    #[test]
+    fn rejects_non_datetime_string_for_rfc3339_format() {
+        let result = parse_to_timestamp("hello", RFC3339_FORMAT);
+        assert!(result.is_none(), "expected None for non-datetime string, got {result:?}");
+    }
+
+    #[test]
+    fn rejects_empty_string_for_rfc3339_format() {
+        let result = parse_to_timestamp("", RFC3339_FORMAT);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parses_naive_datetime_format() {
+        // Parse with an explicit format (no timezone).
+        let fmt = "%Y-%m-%d %H:%M:%S";
+        let ts = parse_to_timestamp("2024-02-10 14:30:00", fmt)
+            .expect("should parse naive datetime");
+        assert!(ts > 0.0);
+    }
+
+    #[test]
+    fn detect_date_format_finds_rfc3339() {
+        let samples = vec!["2024-02-10T14:30:00Z".to_string(), "2024-02-11T09:00:00Z".to_string()];
+        let fmt = detect_date_format(&samples);
+        assert_eq!(fmt, Some(RFC3339_FORMAT));
+    }
+
+    #[test]
+    fn detect_date_format_returns_none_for_non_dates() {
+        let samples = vec!["hello".to_string(), "world".to_string(), "foo".to_string()];
+        let fmt = detect_date_format(&samples);
+        assert!(fmt.is_none());
+    }
+
+    #[test]
+    fn format_timestamp_roundtrip() {
+        // Unix epoch should format to a known string.
+        let s = format_timestamp(0.0);
+        assert_eq!(s, "1970-01-01 00:00:00");
+    }
+}

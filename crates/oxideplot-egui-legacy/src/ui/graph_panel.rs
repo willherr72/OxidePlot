@@ -1,4 +1,4 @@
-use crate::data::datetime;
+use oxideplot_core::data::datetime;
 use crate::processing::downsampling;
 use crate::state::data_series::{InterpolationMode, PlotMode};
 use crate::state::graph_state::{CursorMode, GraphState, SortDirection};
@@ -1341,7 +1341,7 @@ fn draw_cursors(
                             stroke,
                         );
                         let label = if is_datetime {
-                            format!("C{}: {}", i + 1, crate::data::datetime::format_timestamp(x))
+                            format!("C{}: {}", i + 1, oxideplot_core::data::datetime::format_timestamp(x))
                         } else {
                             format!("C{}: {:.4}", i + 1, x)
                         };
