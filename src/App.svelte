@@ -5,6 +5,8 @@
   import type { FileMeta, SeriesSpec, AxisTicksData, ViewState } from './lib/renderer.js';
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
   import Axes from './lib/overlay/Axes.svelte';
+  import Cursors from './lib/overlay/Cursors.svelte';
+  import type { CursorPoint } from './lib/overlay/Cursors.svelte';
 
   let canvas: HTMLCanvasElement;
   const renderer = new Renderer();
@@ -25,10 +27,24 @@
     }
   }
 
+  // ── Cursor mode ────────────────────────────────────────────────────────────
+  let cursorMode = false;
+  let cursors: CursorPoint[] = [];
+
+  function toggleCursorMode() {
+    cursorMode = !cursorMode;
+    if (!cursorMode) {
+      cursors = []; // clear cursors when turning off
+    }
+  }
+
   // ── Pan state ──────────────────────────────────────────────────────────────
   let dragging = false;
   let lastPx = 0;
   let lastPy = 0;
+  // Track pointer-down CSS position for click-vs-drag discrimination
+  let pointerDownCssX = 0;
+  let pointerDownCssY = 0;
 
   /** CSS-pixel → canvas-backing-pixel scale factors. */
   function pixelScale(): { sx: number; sy: number } {
@@ -44,8 +60,12 @@
     dragging = true;
     const { sx, sy } = pixelScale();
     const rect = canvas.getBoundingClientRect();
-    lastPx = (e.clientX - rect.left) * sx;
-    lastPy = (e.clientY - rect.top) * sy;
+    // CSS px position (for click-vs-drag threshold)
+    pointerDownCssX = e.clientX - rect.left;
+    pointerDownCssY = e.clientY - rect.top;
+    // Backing-pixel position for pan
+    lastPx = pointerDownCssX * sx;
+    lastPy = pointerDownCssY * sy;
     canvas.setPointerCapture(e.pointerId);
   }
 
@@ -63,8 +83,32 @@
     refreshView();
   }
 
-  function onPointerUp(_e: PointerEvent) {
+  function onPointerUp(e: PointerEvent) {
+    if (!dragging) return;
     dragging = false;
+
+    // Click-vs-drag: if movement in CSS px is below threshold AND cursorMode is on,
+    // treat as a cursor placement click.
+    const CLICK_THRESHOLD_PX = 4;
+    const rect = canvas.getBoundingClientRect();
+    const upCssX = e.clientX - rect.left;
+    const upCssY = e.clientY - rect.top;
+    const moveDist = Math.sqrt(
+      (upCssX - pointerDownCssX) ** 2 + (upCssY - pointerDownCssY) ** 2
+    );
+
+    if (cursorMode && moveDist < CLICK_THRESHOLD_PX && viewState) {
+      // Convert CSS px → data coordinates
+      const dataX = viewState.x_min + (upCssX / rect.width) * (viewState.x_max - viewState.x_min);
+      const dataY = viewState.y_min + (1 - upCssY / rect.height) * (viewState.y_max - viewState.y_min);
+
+      if (cursors.length >= 2) {
+        // Cycle: reset to a single new cursor
+        cursors = [{ x: dataX, y: dataY }];
+      } else {
+        cursors = [...cursors, { x: dataX, y: dataY }];
+      }
+    }
   }
 
   function onPointerCancel(_e: PointerEvent) {
@@ -158,6 +202,14 @@
     <button class="open-btn" on:click={handleOpen} disabled={loading}>
       {loading ? 'Loading…' : 'Open File'}
     </button>
+    <button
+      class="cursor-btn"
+      class:active={cursorMode}
+      on:click={toggleCursorMode}
+      title={cursorMode ? 'Cursor mode ON — click to place cursors (toggle off to clear)' : 'Cursor mode OFF'}
+    >
+      Cursors
+    </button>
     {#if filePath && !fileMeta}
       <span class="file-label" title={filePath}>
         {filePath.split(/[\\/]/).pop()}
@@ -173,6 +225,7 @@
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <canvas
       bind:this={canvas}
+      style={cursorMode ? 'cursor:crosshair' : ''}
       on:pointerdown={onPointerDown}
       on:pointermove={onPointerMove}
       on:pointerup={onPointerUp}
@@ -182,6 +235,12 @@
     ></canvas>
     <Axes
       {ticks}
+      {viewState}
+      displayW={canvas ? canvas.getBoundingClientRect().width : 0}
+      displayH={canvas ? canvas.getBoundingClientRect().height : 0}
+    />
+    <Cursors
+      {cursors}
       {viewState}
       displayW={canvas ? canvas.getBoundingClientRect().width : 0}
       displayH={canvas ? canvas.getBoundingClientRect().height : 0}
@@ -245,6 +304,29 @@
   .open-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .cursor-btn {
+    padding: 5px 14px;
+    background: #2a2a3a;
+    color: #b0b0cc;
+    border: 1px solid #44445a;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .cursor-btn:hover {
+    background: #3a3a52;
+    color: #e0e0ff;
+  }
+
+  .cursor-btn.active {
+    background: #1a4a60;
+    color: #00e5ff;
+    border-color: #00b8d9;
   }
 
   .file-label {
