@@ -370,6 +370,8 @@ mod wasm_impl {
             self.width = w;
             self.height = h;
             self.renderer.resize(w, h);
+            self.rebuild_visible();
+            self.render();
         }
 
         // ── Private helpers ───────────────────────────────────────────────────

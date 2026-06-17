@@ -70,8 +70,7 @@ pub fn lttb_downsample(x: &[f64], y: &[f64], target: usize) -> (Vec<f64>, Vec<f6
 /// Downsample data for the visible range, applying LTTB when point count exceeds threshold.
 /// Returns (display_x, display_y) ready for plotting.
 ///
-/// Uses binary search to find the visible range when data is sorted by X,
-/// avoiding a full linear scan of the entire dataset.
+/// Assumes `x` is in ascending order (standard time-series contract).
 pub fn downsample_for_view(
     x: &[f64],
     y: &[f64],
@@ -83,39 +82,18 @@ pub fn downsample_for_view(
         return (Vec::new(), Vec::new());
     }
 
-    // Check if X data is sorted (common case for time series).
-    // If sorted, use binary search for O(log n) range finding.
-    let is_sorted = x.windows(2).all(|w| w[0] <= w[1]);
+    // Binary search for the start and end of the visible range.
+    // Include one extra point on each side for line continuity.
+    let start = x.partition_point(|&v| v < view_min).saturating_sub(1);
+    let end = (x.partition_point(|&v| v <= view_max) + 1).min(x.len());
+    let slice_x = &x[start..end];
+    let slice_y = &y[start..end];
 
-    let (vis_x, vis_y) = if is_sorted {
-        // Binary search for the start and end of the visible range.
-        // Include one extra point on each side for line continuity.
-        let start = x.partition_point(|&v| v < view_min).saturating_sub(1);
-        let end = (x.partition_point(|&v| v <= view_max) + 1).min(x.len());
-        let slice_x = &x[start..end];
-        let slice_y = &y[start..end];
+    if slice_x.len() <= max_points {
+        return (slice_x.to_vec(), slice_y.to_vec());
+    }
 
-        if slice_x.len() <= max_points {
-            return (slice_x.to_vec(), slice_y.to_vec());
-        }
-        (slice_x.to_vec(), slice_y.to_vec())
-    } else {
-        // Unsorted data: linear filter
-        let mut vx = Vec::new();
-        let mut vy = Vec::new();
-        for (&xv, &yv) in x.iter().zip(y.iter()) {
-            if xv >= view_min && xv <= view_max {
-                vx.push(xv);
-                vy.push(yv);
-            }
-        }
-        if vx.len() <= max_points {
-            return (vx, vy);
-        }
-        (vx, vy)
-    };
-
-    lttb_downsample(&vis_x, &vis_y, max_points)
+    lttb_downsample(slice_x, slice_y, max_points)
 }
 
 #[cfg(test)]
