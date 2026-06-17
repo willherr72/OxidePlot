@@ -18,8 +18,8 @@
     return `rgba(${r * 255 | 0}, ${g * 255 | 0}, ${b * 255 | 0}, ${a})`;
   }
 
-  function toggleVisible(i: number) {
-    renderer.setSeriesVisible(i, !series[i].visible);
+  function toggleVisible(i: number, visible: boolean) {
+    renderer.setSeriesVisible(i, visible);
     dispatch('change');
   }
 
@@ -55,7 +55,7 @@
           <button
             class="ctrl-btn"
             title={s.visible ? 'Hide series' : 'Show series'}
-            on:click={() => toggleVisible(i)}
+            on:click={() => toggleVisible(i, !s.visible)}
           >{s.visible ? '●' : '○'}</button>
           <button
             class="ctrl-btn"

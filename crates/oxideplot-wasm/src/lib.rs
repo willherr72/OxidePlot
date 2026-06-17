@@ -529,7 +529,11 @@ mod wasm_impl {
                 return;
             }
             let src = self.sources.remove(from);
-            self.sources.insert(to, src);
+            // After remove(from), indices >= from shift down by one.
+            // When to > from we must subtract 1 so the element lands at the
+            // intended logical position (non-adjacent moves are also correct).
+            let adjusted_to = if to > from { to - 1 } else { to };
+            self.sources.insert(adjusted_to, src);
             self.rebuild_visible();
             self.render();
         }
