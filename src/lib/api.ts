@@ -41,3 +41,16 @@ export const saveFile = (
     defaultName,
     contents: Array.from(contents),
   });
+
+/**
+ * Load the persisted preferences JSON string from the app config dir.
+ * Returns '{}' if no prefs file exists yet.
+ */
+export const loadPrefs = (): Promise<string> =>
+  invoke<string>('load_prefs');
+
+/**
+ * Persist a JSON string to the app config dir as prefs.json.
+ */
+export const savePrefs = (contents: string): Promise<void> =>
+  invoke<void>('save_prefs', { contents });

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { pickFile, readFile, saveFile } from './lib/api.js';
+  import { pickFile, readFile, saveFile, loadPrefs, savePrefs } from './lib/api.js';
   import { Renderer } from './lib/renderer.js';
   import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from './lib/renderer.js';
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
@@ -18,6 +18,31 @@
   let error: string | null = null;
   let loading = false;
   let viewState: ViewState | null = null;
+
+  // ── Prefs ──────────────────────────────────────────────────────────────────
+  interface Prefs {
+    recentFiles: string[];
+    theme: string;
+  }
+  const DEFAULT_PREFS: Prefs = { recentFiles: [], theme: 'dark' };
+  let prefs: Prefs = { ...DEFAULT_PREFS };
+  let showRecent = false;
+
+  /** Persist current prefs to disk. Task 5.6 can also call this after changing theme. */
+  async function persistPrefs() {
+    try {
+      await savePrefs(JSON.stringify(prefs));
+    } catch (_) {
+      // non-fatal: silently ignore
+    }
+  }
+
+  /** Add path to recent files (dedupe, cap at 8), then persist. */
+  async function recordRecentFile(path: string) {
+    const filtered = prefs.recentFiles.filter(p => p !== path);
+    prefs = { ...prefs, recentFiles: [path, ...filtered].slice(0, 8) };
+    await persistPrefs();
+  }
   let ticks: AxisTicksData | null = null;
   let seriesInfo: SeriesInfoEntry[] = [];
 
@@ -195,6 +220,16 @@
   }
 
   onMount(async () => {
+    // Load prefs first so recent files are available immediately.
+    try {
+      const txt = await loadPrefs();
+      let parsed: Partial<Prefs> = {};
+      try { parsed = JSON.parse(txt); } catch (_) {}
+      prefs = { ...DEFAULT_PREFS, ...parsed };
+    } catch (_) {
+      // non-fatal: use defaults
+    }
+
     try {
       await renderer.init();
       await renderer.create(canvas);
@@ -221,24 +256,43 @@
     return () => ro.disconnect();
   });
 
+  /** Load a file at a known path (shared by dialog-pick and recent-click). */
+  async function openPath(path: string) {
+    loading = true;
+    error = null;
+    try {
+      filePath = path;
+      const numArr = await readFile(path);
+      const bytes = new Uint8Array(numArr);
+      const filename = path.split(/[\\/]/).pop() ?? path;
+      fileMeta = renderer.loadFileBytes(bytes, filename);
+      await recordRecentFile(path);
+    } catch (e) {
+      error = `Failed to open file: ${e}`;
+      // If a recent file is now inaccessible, drop it from the list.
+      prefs = { ...prefs, recentFiles: prefs.recentFiles.filter(p => p !== path) };
+      await persistPrefs();
+    } finally {
+      loading = false;
+    }
+  }
+
   async function handleOpen() {
     error = null;
     loading = true;
     try {
       const path = await pickFile();
       if (!path) { loading = false; return; }
-      filePath = path;
-
-      const numArr = await readFile(path);
-      const bytes = new Uint8Array(numArr);
-      const filename = path.split(/[\\/]/).pop() ?? path;
-
-      fileMeta = renderer.loadFileBytes(bytes, filename);
+      await openPath(path);
     } catch (e) {
       error = `Failed to open file: ${e}`;
-    } finally {
       loading = false;
     }
+  }
+
+  async function handleOpenRecent(path: string) {
+    showRecent = false;
+    await openPath(path);
   }
 
   function handleConfirm(event: CustomEvent<SeriesSpec[]>) {
@@ -326,6 +380,31 @@
     <button class="open-btn" on:click={handleOpen} disabled={loading}>
       {loading ? 'Loading…' : 'Open File'}
     </button>
+    {#if prefs.recentFiles.length > 0}
+      <div class="recent-wrap">
+        <button
+          class="cursor-btn"
+          on:click={() => (showRecent = !showRecent)}
+          title="Recent files"
+        >
+          Recent ▾
+        </button>
+        {#if showRecent}
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <div class="recent-dropdown" on:mouseleave={() => (showRecent = false)}>
+            {#each prefs.recentFiles as rpath}
+              <button
+                class="recent-item"
+                title={rpath}
+                on:click={() => handleOpenRecent(rpath)}
+              >
+                {rpath.split(/[\\/]/).pop() ?? rpath}
+              </button>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
     <button
       class="cursor-btn"
       disabled={!hasData}
@@ -558,6 +637,50 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .recent-wrap {
+    position: relative;
+  }
+
+  .recent-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    background: #1a1a28;
+    border: 1px solid #44445a;
+    border-radius: 5px;
+    min-width: 220px;
+    max-width: 400px;
+    z-index: 100;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+  }
+
+  .recent-item {
+    display: block;
+    width: 100%;
+    padding: 6px 12px;
+    background: transparent;
+    color: #b0b0cc;
+    border: none;
+    border-bottom: 1px solid #2a2a3a;
+    text-align: left;
+    cursor: pointer;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.1s, color 0.1s;
+  }
+
+  .recent-item:last-child {
+    border-bottom: none;
+  }
+
+  .recent-item:hover {
+    background: #2a2a42;
+    color: #e0e0ff;
   }
 
   .canvas-wrap {

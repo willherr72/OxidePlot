@@ -1,3 +1,24 @@
+use tauri::Manager;
+
+#[tauri::command]
+pub fn load_prefs(app: tauri::AppHandle) -> Result<String, String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let prefs_path = config_dir.join("prefs.json");
+    if prefs_path.exists() {
+        std::fs::read_to_string(&prefs_path).map_err(|e| e.to_string())
+    } else {
+        Ok("{}".into())
+    }
+}
+
+#[tauri::command]
+pub fn save_prefs(app: tauri::AppHandle, contents: String) -> Result<(), String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    let prefs_path = config_dir.join("prefs.json");
+    std::fs::write(&prefs_path, contents).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn pick_file() -> Option<String> {
     rfd::FileDialog::new()

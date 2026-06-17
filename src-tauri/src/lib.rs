@@ -16,7 +16,9 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
       commands::pick_file,
       commands::read_file,
-      commands::save_file
+      commands::save_file,
+      commands::load_prefs,
+      commands::save_prefs
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
