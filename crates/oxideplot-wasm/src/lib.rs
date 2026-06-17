@@ -109,6 +109,17 @@ mod wasm_impl {
         }
     }
 
+    /// RFC 4180 CSV field escaping: wrap in double quotes and double any
+    /// internal quotes if the field contains a comma, quote, or newline.
+    /// (Numeric cells never need this; only column names might.)
+    fn csv_escape(field: &str) -> String {
+        if field.contains([',', '"', '\n', '\r']) {
+            format!("\"{}\"", field.replace('"', "\"\""))
+        } else {
+            field.to_string()
+        }
+    }
+
     /// A GPU-accelerated 2D plot bound to an HTML canvas.
     ///
     /// Usage from JavaScript/TypeScript:
@@ -606,10 +617,10 @@ mod wasm_impl {
             }
 
             // Header row
-            let x_header = self.sources[0].x_name.clone();
             let mut rows: Vec<String> = Vec::new();
-            let header = std::iter::once(x_header)
-                .chain(self.sources.iter().map(|s| s.name.clone()))
+            let header = std::iter::once(self.sources[0].x_name.as_str())
+                .chain(self.sources.iter().map(|s| s.name.as_str()))
+                .map(csv_escape)
                 .collect::<Vec<_>>()
                 .join(",");
             rows.push(header);
