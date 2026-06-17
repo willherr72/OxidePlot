@@ -5,6 +5,7 @@
   import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from './lib/renderer.js';
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
   import SeriesList from './lib/components/SeriesList.svelte';
+  import Settings from './lib/components/Settings.svelte';
   import Axes from './lib/overlay/Axes.svelte';
   import Cursors from './lib/overlay/Cursors.svelte';
   import type { CursorPoint } from './lib/overlay/Cursors.svelte';
@@ -40,6 +41,32 @@
   function handleSeriesChange() {
     refreshSeriesInfo();
     refreshView();
+  }
+
+  // ── Settings panel ─────────────────────────────────────────────────────────
+  let showSettings = false;
+  let showGrid = true;
+  let lineWidth = 2.0;
+  let pointRadius = 3.0;
+
+  function toggleSettings() {
+    showSettings = !showSettings;
+  }
+
+  function handleLineWidth(event: CustomEvent<{ value: number }>) {
+    lineWidth = event.detail.value;
+    try { renderer.setLineWidth(lineWidth); } catch (_) {}
+    refreshView();
+  }
+
+  function handlePointRadius(event: CustomEvent<{ value: number }>) {
+    pointRadius = event.detail.value;
+    try { renderer.setPointRadius(pointRadius); } catch (_) {}
+    refreshView();
+  }
+
+  function handleShowGrid(event: CustomEvent<{ value: boolean }>) {
+    showGrid = event.detail.value;
   }
 
   // ── Draw mode ──────────────────────────────────────────────────────────────
@@ -264,6 +291,14 @@
     >
       {DRAW_MODE_LABELS[drawMode]}
     </button>
+    <button
+      class="cursor-btn"
+      class:active={showSettings}
+      on:click={toggleSettings}
+      title="Toggle settings panel"
+    >
+      Settings
+    </button>
     {#if filePath && !fileMeta}
       <span class="file-label" title={filePath}>
         {filePath.split(/[\\/]/).pop()}
@@ -292,6 +327,7 @@
       {viewState}
       displayW={canvas ? canvas.getBoundingClientRect().width : 0}
       displayH={canvas ? canvas.getBoundingClientRect().height : 0}
+      {showGrid}
     />
     <Cursors
       {cursors}
@@ -304,6 +340,16 @@
         series={seriesInfo}
         {renderer}
         on:change={handleSeriesChange}
+      />
+    {/if}
+    {#if showSettings}
+      <Settings
+        {lineWidth}
+        {pointRadius}
+        {showGrid}
+        on:linewidth={handleLineWidth}
+        on:pointradius={handlePointRadius}
+        on:showgrid={handleShowGrid}
       />
     {/if}
   </div>

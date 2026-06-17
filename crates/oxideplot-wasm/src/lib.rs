@@ -115,6 +115,10 @@ mod wasm_impl {
         view: PlotViewState,
         /// True when the X axis contains datetime (Unix timestamp) data.
         x_is_time: bool,
+        /// Line width for all series (default 2.0).
+        line_width: f32,
+        /// Point radius for all series (default 3.0).
+        point_radius: f32,
     }
 
     #[wasm_bindgen]
@@ -167,6 +171,8 @@ mod wasm_impl {
                 loaded: None,
                 view: PlotViewState::default(),
                 x_is_time: false,
+                line_width: 2.0,
+                point_radius: 3.0,
             }
         }
 
@@ -436,8 +442,8 @@ mod wasm_impl {
                 view_min: [self.view.x_min as f32, self.view.y_min as f32],
                 view_max: [self.view.x_max as f32, self.view.y_max as f32],
                 resolution: [self.width as f32, self.height as f32],
-                line_width: 2.0,
-                point_radius: 3.0,
+                line_width: self.line_width,
+                point_radius: self.point_radius,
                 color: [0.0, 0.0, 0.0, 0.0], // overridden per-series inside build_draw_calls
                 _padding: [0.0; 4],
             };
@@ -538,6 +544,24 @@ mod wasm_impl {
             self.render();
         }
 
+        // ── Appearance settings ───────────────────────────────────────────────
+
+        /// Set the line width for all series and re-render.
+        #[wasm_bindgen]
+        pub fn set_line_width(&mut self, w: f32) {
+            self.line_width = w;
+            self.rebuild_visible();
+            self.render();
+        }
+
+        /// Set the point radius for all series and re-render.
+        #[wasm_bindgen]
+        pub fn set_point_radius(&mut self, r: f32) {
+            self.point_radius = r;
+            self.rebuild_visible();
+            self.render();
+        }
+
         // ── Private helpers ───────────────────────────────────────────────────
 
         /// Rebuild `self.series` by LTTB-downsampling each source series to the
@@ -569,8 +593,8 @@ mod wasm_impl {
                         return SeriesGpuData {
                             points: vec![],
                             color: src.color,
-                            line_width: 2.0,
-                            point_radius: 3.0,
+                            line_width: self.line_width,
+                            point_radius: self.point_radius,
                             draw_mode: src.draw_mode,
                         };
                     }
@@ -587,8 +611,8 @@ mod wasm_impl {
                     SeriesGpuData {
                         points,
                         color: src.color,
-                        line_width: 2.0,
-                        point_radius: 3.0,
+                        line_width: self.line_width,
+                        point_radius: self.point_radius,
                         draw_mode: src.draw_mode,
                     }
                 })

@@ -198,6 +198,24 @@ export class Renderer {
     (this.plot as any).move_series(from, to);
   }
 
+  /**
+   * Set the line width for all series and re-render.
+   * @param w - line width in pixels (e.g. 0.5–6)
+   */
+  setLineWidth(w: number): void {
+    this.assertPlot();
+    (this.plot as any).set_line_width(w);
+  }
+
+  /**
+   * Set the point radius for all series and re-render.
+   * @param r - point radius in pixels (e.g. 1–10)
+   */
+  setPointRadius(r: number): void {
+    this.assertPlot();
+    (this.plot as any).set_point_radius(r);
+  }
+
   private assertPlot(): void {
     if (!this.plot) throw new Error('Renderer not created — call create(canvas) first');
   }

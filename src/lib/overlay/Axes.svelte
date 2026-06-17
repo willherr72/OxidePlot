@@ -15,6 +15,7 @@
   export let viewState: ViewState | null = null;
   export let displayW: number = 0;
   export let displayH: number = 0;
+  export let showGrid: boolean = true;
 
   // Tick dimensions (CSS px)
   const MAJOR_TICK_LEN = 8;
@@ -57,26 +58,30 @@
   style="position:absolute;top:0;left:0;pointer-events:none;overflow:visible"
 >
   <!-- Faint major gridlines for X -->
-  {#each xTicks.filter(t => t.major) as tick}
-    {@const px = xToScreen(tick.value)}
-    <line
-      x1={px} y1={0}
-      x2={px} y2={displayH}
-      stroke="rgba(255,255,255,0.06)"
-      stroke-width="1"
-    />
-  {/each}
+  {#if showGrid}
+    {#each xTicks.filter(t => t.major) as tick}
+      {@const px = xToScreen(tick.value)}
+      <line
+        x1={px} y1={0}
+        x2={px} y2={displayH}
+        stroke="rgba(255,255,255,0.06)"
+        stroke-width="1"
+      />
+    {/each}
+  {/if}
 
   <!-- Faint major gridlines for Y -->
-  {#each yTicks.filter(t => t.major) as tick}
-    {@const py = yToScreen(tick.value)}
-    <line
-      x1={0} y1={py}
-      x2={displayW} y2={py}
-      stroke="rgba(255,255,255,0.06)"
-      stroke-width="1"
-    />
-  {/each}
+  {#if showGrid}
+    {#each yTicks.filter(t => t.major) as tick}
+      {@const py = yToScreen(tick.value)}
+      <line
+        x1={0} y1={py}
+        x2={displayW} y2={py}
+        stroke="rgba(255,255,255,0.06)"
+        stroke-width="1"
+      />
+    {/each}
+  {/if}
 
   <!-- X axis ticks + labels (bottom edge) -->
   {#each xTicks as tick}
