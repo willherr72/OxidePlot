@@ -28,6 +28,7 @@
   }
 
   function onPointerDown(e: PointerEvent) {
+    if (e.button !== 0) return; // left button only — don't pan on right/middle click
     dragging = true;
     const { sx, sy } = pixelScale();
     const rect = canvas.getBoundingClientRect();
