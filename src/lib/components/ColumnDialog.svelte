@@ -62,12 +62,13 @@
       <label class="section-title">X Axis (time or index)</label>
       <div class="col-list">
         {#each meta.columns as col, i}
-          <label class="col-row" class:selected={xCol === i}>
+          <label class="col-row" class:selected={xCol === i} class:disabled={col.kind === 'text'}>
             <input
               type="radio"
               name="x_col"
               value={i}
               bind:group={xCol}
+              disabled={col.kind === 'text'}
             />
             <span class="col-name">{col.name}</span>
             <span class="col-kind kind-{col.kind}">{col.kind}</span>
