@@ -13,6 +13,10 @@
 //
 // Task 4.1 — adopts `PlotViewState` for the view, exposes `pan`, `zoom`,
 // and `view_state` for interactive canvas-driven interaction.
+//
+// Task 4.2 — viewport-aware downsampling.  Full source data is stored in
+// `sources: Vec<SourceSeries>` and `rebuild_visible()` re-runs LTTB over the
+// visible X-range on every pan/zoom/auto_fit, giving ~1 point per pixel.
 
 use wasm_bindgen::prelude::*;
 
@@ -25,12 +29,21 @@ mod wasm_impl {
     use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
     use oxideplot_core::render::renderer::PlotRenderer;
     use oxideplot_core::data::loader::{LoadedData, FileMeta, load_from_bytes, column_to_f64, column_to_timestamps};
-    use oxideplot_core::processing::downsampling::lttb_downsample;
+    use oxideplot_core::processing::downsampling::downsample_for_view;
     use oxideplot_core::state::plot_view::PlotViewState;
     use oxideplot_core::geom::{Pos2, Rect};
 
-    /// Maximum points per series before LTTB downsampling kicks in.
-    const MAX_SERIES_POINTS: usize = 2000;
+    /// Minimum target point count when width is very small.
+    const MIN_TARGET_POINTS: usize = 800;
+
+    /// Full source data for one series, stored before any downsampling.
+    /// xs must be in ascending order (standard time-series assumption).
+    struct SourceSeries {
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+        color: [f32; 4],
+        draw_mode: DrawMode,
+    }
 
     /// JSON spec for one series passed in from JS via `set_series`.
     #[derive(Deserialize)]
@@ -61,6 +74,9 @@ mod wasm_impl {
     #[wasm_bindgen]
     pub struct OxidePlot {
         renderer: PlotRenderer,
+        /// Full source data per series (stored un-downsampled).
+        sources: Vec<SourceSeries>,
+        /// Viewport-downsampled GPU series, rebuilt by rebuild_visible().
         series: Vec<SeriesGpuData>,
         grid: GridGpuData,
         width: u32,
@@ -113,6 +129,7 @@ mod wasm_impl {
 
             OxidePlot {
                 renderer,
+                sources: vec![],
                 series: vec![],
                 grid,
                 width,
@@ -146,6 +163,7 @@ mod wasm_impl {
             // Store parsed data for series construction.
             self.loaded = Some(data);
             // Clear any previous series until the user picks new columns.
+            self.sources.clear();
             self.series.clear();
 
             serde_wasm_bindgen::to_value(&meta)
@@ -172,7 +190,7 @@ mod wasm_impl {
                 .map_err(|e| JsValue::from_str(&format!("Invalid series spec JSON: {e}")))?;
 
             let num_cols = data.columns.len();
-            let mut new_series: Vec<SeriesGpuData> = Vec::with_capacity(specs.len());
+            let mut new_sources: Vec<SourceSeries> = Vec::with_capacity(specs.len());
 
             for spec in &specs {
                 if spec.x_col >= num_cols || spec.y_col >= num_cols {
@@ -197,7 +215,7 @@ mod wasm_impl {
                 let (y_vals, _) = column_to_f64(y_col_data);
 
                 // Zip and filter: keep only finite pairs.
-                let (mut xs, mut ys): (Vec<f64>, Vec<f64>) = x_vals
+                let (xs, ys): (Vec<f64>, Vec<f64>) = x_vals
                     .iter()
                     .zip(y_vals.iter())
                     .filter(|(&x, &y)| x.is_finite() && y.is_finite())
@@ -208,46 +226,33 @@ mod wasm_impl {
                     continue;
                 }
 
-                // Downsample if the series is large.
-                if xs.len() > MAX_SERIES_POINTS {
-                    let (ds_x, ds_y) = lttb_downsample(&xs, &ys, MAX_SERIES_POINTS);
-                    xs = ds_x;
-                    ys = ds_y;
-                }
-
-                // Build GPU points as [f32; 2] pairs.
-                let points: Vec<[f32; 2]> = xs
-                    .iter()
-                    .zip(ys.iter())
-                    .map(|(&x, &y)| [x as f32, y as f32])
-                    .collect();
-
                 let draw_mode = match spec.draw_mode.as_str() {
                     "step" => DrawMode::Step,
                     "points" => DrawMode::Points,
                     _ => DrawMode::Lines,
                 };
 
-                new_series.push(SeriesGpuData {
-                    points,
+                // Store FULL source data — no downsampling here.
+                // rebuild_visible() will LTTB-downsample to the visible range.
+                new_sources.push(SourceSeries {
+                    xs,
+                    ys,
                     color: spec.color,
-                    line_width: 2.0,
-                    point_radius: 3.0,
                     draw_mode,
                 });
             }
 
-            self.series = new_series;
-            // auto_fit now calls render() internally.
+            self.sources = new_sources;
+            // auto_fit computes bounds from source data, calls rebuild_visible + render.
             self.auto_fit();
             Ok(())
         }
 
         /// Auto-fit the view bounds to encompass all stored series with 5% padding,
-        /// then re-render.
+        /// then rebuild visible downsampled series and re-render.
         #[wasm_bindgen]
         pub fn auto_fit(&mut self) {
-            if self.series.is_empty() {
+            if self.sources.is_empty() {
                 return;
             }
 
@@ -256,17 +261,15 @@ mod wasm_impl {
             let mut y_min = f64::INFINITY;
             let mut y_max = f64::NEG_INFINITY;
 
-            for s in &self.series {
-                for &[x, y] in &s.points {
-                    let xd = x as f64;
-                    let yd = y as f64;
-                    if xd.is_finite() {
-                        x_min = x_min.min(xd);
-                        x_max = x_max.max(xd);
+            for s in &self.sources {
+                for (&x, &y) in s.xs.iter().zip(s.ys.iter()) {
+                    if x.is_finite() {
+                        x_min = x_min.min(x);
+                        x_max = x_max.max(x);
                     }
-                    if yd.is_finite() {
-                        y_min = y_min.min(yd);
-                        y_max = y_max.max(yd);
+                    if y.is_finite() {
+                        y_min = y_min.min(y);
+                        y_max = y_max.max(y);
                     }
                 }
             }
@@ -285,6 +288,7 @@ mod wasm_impl {
             self.view.auto_fit = false;
             self.view.initialized = true;
 
+            self.rebuild_visible();
             self.render();
         }
 
@@ -293,6 +297,7 @@ mod wasm_impl {
         pub fn pan(&mut self, dx_px: f32, dy_px: f32) {
             let rect = self.canvas_rect();
             self.view.pan(dx_px, dy_px, rect);
+            self.rebuild_visible();
             self.render();
         }
 
@@ -305,6 +310,7 @@ mod wasm_impl {
             let anchor = Pos2 { x: anchor_x, y: anchor_y };
             let rect = self.canvas_rect();
             self.view.zoom(scroll_y, anchor, rect);
+            self.rebuild_visible();
             self.render();
         }
 
@@ -367,6 +373,48 @@ mod wasm_impl {
         }
 
         // ── Private helpers ───────────────────────────────────────────────────
+
+        /// Rebuild `self.series` by LTTB-downsampling each source series to the
+        /// visible X-range.  Target point count = max(width, MIN_TARGET_POINTS),
+        /// giving roughly one point per horizontal pixel.
+        ///
+        /// Uses `downsample_for_view` from oxideplot-core, which uses binary
+        /// search on sorted X data and extends the window by one extra point on
+        /// each edge so lines don't clip while panning.
+        ///
+        /// Performance note: this runs on every pan/zoom event (per pointermove
+        /// during a drag).  For very large datasets (~1M points) the O(n) visible
+        /// scan + LTTB may be noticeable.  For this MVP the straightforward
+        /// implementation is acceptable; debouncing or spatial indices can be
+        /// added in a future task if profiling warrants it.
+        fn rebuild_visible(&mut self) {
+            let target = (self.width as usize).max(MIN_TARGET_POINTS);
+            let x_min = self.view.x_min;
+            let x_max = self.view.x_max;
+
+            self.series = self
+                .sources
+                .iter()
+                .map(|src| {
+                    let (vis_x, vis_y) =
+                        downsample_for_view(&src.xs, &src.ys, x_min, x_max, target);
+
+                    let points: Vec<[f32; 2]> = vis_x
+                        .iter()
+                        .zip(vis_y.iter())
+                        .map(|(&x, &y)| [x as f32, y as f32])
+                        .collect();
+
+                    SeriesGpuData {
+                        points,
+                        color: src.color,
+                        line_width: 2.0,
+                        point_radius: 3.0,
+                        draw_mode: src.draw_mode,
+                    }
+                })
+                .collect();
+        }
 
         /// Build a canvas-sized Rect (backing-store pixels, origin at top-left).
         fn canvas_rect(&self) -> Rect {
