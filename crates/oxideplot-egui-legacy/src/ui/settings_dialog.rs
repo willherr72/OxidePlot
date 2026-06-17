@@ -1,5 +1,5 @@
-use crate::processing::math_ops::{MathOp, perform_math};
-use crate::processing::statistics::SeriesStats;
+use oxideplot_core::processing::math_ops::{MathOp, perform_math};
+use oxideplot_core::processing::statistics::SeriesStats;
 use crate::state::data_series::{color_for_index, DataSeries, InterpolationMode};
 use crate::state::graph_state::GraphState;
 

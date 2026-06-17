@@ -117,3 +117,44 @@ pub fn downsample_for_view(
 
     lttb_downsample(&vis_x, &vis_y, max_points)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Downsampling a large series to N points returns exactly N points
+    /// and preserves the first and last data points.
+    #[test]
+    fn downsample_keeps_endpoints_and_count() {
+        let xs: Vec<f64> = (0..10_000).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| (x * 0.01).sin()).collect();
+        let (out_x, out_y) = lttb_downsample(&xs, &ys, 500);
+        assert_eq!(out_x.len(), 500);
+        assert_eq!(out_y.len(), 500);
+        assert_eq!(out_x[0], xs[0]);
+        assert_eq!(*out_x.last().unwrap(), *xs.last().unwrap());
+        assert_eq!(out_y[0], ys[0]);
+        assert_eq!(*out_y.last().unwrap(), *ys.last().unwrap());
+    }
+
+    /// When target >= input length, lttb_downsample returns the input unchanged (no-op).
+    #[test]
+    fn downsample_noop_when_target_exceeds_len() {
+        let xs = vec![0.0_f64, 1.0, 2.0];
+        let ys = vec![0.0_f64, 1.0, 0.0];
+        let (out_x, out_y) = lttb_downsample(&xs, &ys, 100);
+        assert_eq!(out_x, xs);
+        assert_eq!(out_y, ys);
+    }
+
+    /// When target < 3, lttb_downsample returns the input unchanged (degenerate no-op).
+    #[test]
+    fn downsample_noop_when_target_lt_3() {
+        let xs: Vec<f64> = (0..1000).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| x * 2.0).collect();
+        // target = 2 triggers the `target < 3` early-return path
+        let (out_x, out_y) = lttb_downsample(&xs, &ys, 2);
+        assert_eq!(out_x.len(), xs.len());
+        assert_eq!(out_y.len(), ys.len());
+    }
+}

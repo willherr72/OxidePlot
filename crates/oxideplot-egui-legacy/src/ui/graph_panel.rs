@@ -1,5 +1,5 @@
 use oxideplot_core::data::datetime;
-use crate::processing::downsampling;
+use oxideplot_core::processing::downsampling;
 use crate::state::data_series::{InterpolationMode, PlotMode};
 use crate::state::graph_state::{CursorMode, GraphState, SortDirection};
 use crate::state::theme::Theme;

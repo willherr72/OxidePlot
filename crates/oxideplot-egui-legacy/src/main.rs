@@ -1,5 +1,4 @@
 mod state;
-mod processing;
 mod ui;
 mod render;
 mod plot3d;
