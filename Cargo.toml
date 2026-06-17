@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oxideplot-egui-legacy", "src-tauri"]
+members = ["crates/oxideplot-egui-legacy", "src-tauri", "crates/oxideplot-wasm"]
 
 [profile.release]
 opt-level = 3
