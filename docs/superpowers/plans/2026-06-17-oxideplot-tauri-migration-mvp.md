@@ -476,26 +476,32 @@ Expected: both succeed.
 
 > Remove the egui_wgpu coupling from `render/` and stand up a `PlotRenderer` that owns its own device/queue/surface. Then draw a hard-coded plot via the wasm wrapper.
 
-### Task 2.1: Move `render/` into core and decouple from egui
+### Task 2.1: Move gpu_types + grid helpers into core; add geom-based view interaction
+
+> **REVISED after Task 1.4.** `PlotViewState` and its data methods (`fit_to_data`, `auto_scale_y_*`, `set_x_range`, `x_range_changed`, `snapshot_x_range`) ALREADY moved to `crates/oxideplot-core/src/state/plot_view.rs`. Its egui-typed methods (`handle_input`, `screen_to_data`, `data_to_screen`) currently live in the legacy `PlotViewStateExt` trait in `crates/oxideplot-egui-legacy/src/render/plot_interaction.rs`, and the pure free fns `compute_grid_lines` + `format_tick_value` are still in that legacy file. The wgpu renderer (`gpu_plot.rs`) is handled in Task 2.2. So this task does three things: relocate `gpu_types.rs`, relocate the grid/tick helpers, and add geom-based interaction methods to the core `PlotViewState`.
 
 **Files:**
-- Move: `.../render/gpu_types.rs`, `gpu_plot.rs`, `plot_interaction.rs` → `crates/oxideplot-core/src/render/`
-- Create: `crates/oxideplot-core/src/render/renderer.rs` (the new `PlotRenderer`)
+- Move: `crates/oxideplot-egui-legacy/src/render/gpu_types.rs` → `crates/oxideplot-core/src/render/gpu_types.rs`
+- Create: `crates/oxideplot-core/src/render/mod.rs`, `crates/oxideplot-core/src/render/axis.rs`
+- Modify: `crates/oxideplot-core/src/state/plot_view.rs`, `crates/oxideplot-core/src/lib.rs`
+- Modify (legacy): `render/plot_interaction.rs` and any callers of the removed coordinate methods.
 
-- [ ] **Step 1: Move `gpu_types.rs` verbatim** — it has no egui dependency. Uncomment `pub mod render;` with a `render/mod.rs` exposing submodules.
+- [ ] **Step 1: Move `gpu_types.rs` into core** — it has no egui dependency. `git mv` it to `crates/oxideplot-core/src/render/gpu_types.rs`. Create `crates/oxideplot-core/src/render/mod.rs` with `pub mod gpu_types; pub mod axis;`. Uncomment `pub mod render;` in `crates/oxideplot-core/src/lib.rs`.
 
-- [ ] **Step 2: Port `plot_interaction.rs` to plain geometry**
+- [ ] **Step 2: Move the pure grid/tick helpers into core** — move `compute_grid_lines` and `format_tick_value` (both pure, no egui) from legacy `render/plot_interaction.rs` into `crates/oxideplot-core/src/render/axis.rs`. In legacy, repoint every reference to `oxideplot_core::render::axis::{compute_grid_lines, format_tick_value}` (grep both names).
 
-Move the file; then: replace `egui::Rect`→`crate::geom::Rect`, `egui::Pos2`→`crate::geom::Pos2`. Delete `handle_input(response, rect)` (egui-specific) and replace with pure methods:
+- [ ] **Step 3: Add geom-based interaction methods to the core `PlotViewState`** (append to the `impl PlotViewState` in `plot_view.rs`). `geom::Rect` exposes `left`/`top`/`width`/`height` as FIELDS:
 
 ```rust
 impl PlotViewState {
+    /// Pan the view by a pixel drag delta.
     pub fn pan(&mut self, dx_px: f32, dy_px: f32, rect: crate::geom::Rect) {
         let dx = -(dx_px as f64) * (self.x_max - self.x_min) / rect.width as f64;
         let dy = (dy_px as f64) * (self.y_max - self.y_min) / rect.height as f64;
         self.x_min += dx; self.x_max += dx; self.y_min += dy; self.y_max += dy;
         self.auto_fit = false;
     }
+    /// Zoom about a screen-space anchor using a scroll delta.
     pub fn zoom(&mut self, scroll_y: f32, anchor: crate::geom::Pos2, rect: crate::geom::Rect) {
         let zoom_factor = (1.0 - (scroll_y as f64) * 0.001).clamp(0.5, 2.0);
         let (cx, cy) = self.screen_to_data(anchor, rect);
@@ -505,12 +511,37 @@ impl PlotViewState {
         self.y_max = cy + (self.y_max - cy) * zoom_factor;
         self.auto_fit = false;
     }
+    /// Screen pixel position within `rect` -> data coordinates.
+    pub fn screen_to_data(&self, pos: crate::geom::Pos2, rect: crate::geom::Rect) -> (f64, f64) {
+        let t_x = (pos.x - rect.left) as f64 / rect.width as f64;
+        let t_y = 1.0 - (pos.y - rect.top) as f64 / rect.height as f64;
+        (self.x_min + t_x * (self.x_max - self.x_min), self.y_min + t_y * (self.y_max - self.y_min))
+    }
+    /// Data coordinates -> screen pixel position within `rect`.
+    pub fn data_to_screen(&self, x: f64, y: f64, rect: crate::geom::Rect) -> crate::geom::Pos2 {
+        let t_x = (x - self.x_min) / (self.x_max - self.x_min);
+        let t_y = 1.0 - (y - self.y_min) / (self.y_max - self.y_min);
+        crate::geom::Pos2 { x: rect.left + (t_x as f32) * rect.width, y: rect.top + (t_y as f32) * rect.height }
+    }
 }
 ```
 
-Keep `screen_to_data`, `data_to_screen`, `fit_to_data`, `auto_scale_y_to_visible`, `compute_grid_lines`, `format_tick_value` — change their `egui::Rect/Pos2` params to `crate::geom::*`.
+- [ ] **Step 4: Resolve the inherent-vs-trait name clash in legacy.** Core `PlotViewState` now has INHERENT `screen_to_data`/`data_to_screen`. Rust resolves a method call to the inherent method by name before considering a trait method, then type-checks args — so the legacy `PlotViewStateExt::screen_to_data`/`data_to_screen` (egui-typed) would now conflict and break compilation. Fix: **remove `screen_to_data` and `data_to_screen` from the legacy `PlotViewStateExt` trait and its impl (keep only `handle_input`).** Update `handle_input` and EVERY other legacy caller of those two methods to call the core inherent methods, converting egui↔geom at the boundary with helpers added in legacy:
 
-- [ ] **Step 3: Write a unit test for the pure interaction math**
+```rust
+fn to_geom_rect(r: egui::Rect) -> oxideplot_core::geom::Rect {
+    oxideplot_core::geom::Rect { left: r.min.x, top: r.min.y, width: r.width(), height: r.height() }
+}
+fn to_geom_pos(p: egui::Pos2) -> oxideplot_core::geom::Pos2 {
+    oxideplot_core::geom::Pos2 { x: p.x, y: p.y }
+}
+// data_to_screen now returns geom::Pos2; convert back where an egui::Pos2 is needed:
+//   let g = view.data_to_screen(x, y, to_geom_rect(rect)); let p = egui::pos2(g.x, g.y);
+```
+
+Grep legacy for `screen_to_data` and `data_to_screen` to find all call sites (expect `handle_input` itself plus cursor/label drawing in `graph_panel.rs`).
+
+- [ ] **Step 5: Tests** (in `plot_view.rs` for the methods, `render/axis.rs` for grid):
 
 ```rust
 #[cfg(test)]
@@ -520,18 +551,36 @@ mod tests {
     #[test]
     fn pan_shifts_view_left() {
         let mut v = PlotViewState { x_min: 0.0, x_max: 10.0, y_min: 0.0, y_max: 10.0, ..Default::default() };
-        let r = Rect { left: 0.0, top: 0.0, width: 100.0, height: 100.0 };
-        v.pan(10.0, 0.0, r); // drag right by 10px => view moves left
-        assert!(v.x_min < 0.0 && v.x_max < 10.0);
+        v.pan(10.0, 0.0, Rect { left: 0.0, top: 0.0, width: 100.0, height: 100.0 });
+        assert!(v.x_min < 0.0 && v.x_max < 10.0, "drag-right should move the view left");
     }
     #[test]
-    fn grid_lines_within_range() {
-        for (val, _major) in compute_grid_lines(0.0, 100.0) { assert!((0.0..=100.0).contains(&val)); }
+    fn screen_data_roundtrip() {
+        let v = PlotViewState { x_min: 0.0, x_max: 10.0, y_min: 0.0, y_max: 10.0, ..Default::default() };
+        let r = Rect { left: 0.0, top: 0.0, width: 100.0, height: 100.0 };
+        let p = v.data_to_screen(5.0, 5.0, r);
+        let (dx, dy) = v.screen_to_data(p, r);
+        assert!((dx - 5.0).abs() < 1e-9 && (dy - 5.0).abs() < 1e-9);
     }
 }
 ```
 
-Run: `cargo test -p oxideplot-core` → PASS. Commit: `refactor: move render interaction to core, decouple from egui`.
+And in `render/axis.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn grid_lines_within_range() {
+        let lines = compute_grid_lines(0.0, 100.0);
+        assert!(!lines.is_empty());
+        for (val, _major) in lines { assert!((0.0..=100.0).contains(&val)); }
+    }
+}
+```
+
+- [ ] **Step 6: Verify + commit.** Run: `cargo test -p oxideplot-core` (new tests pass + prior 11 still pass), `cargo build -p oxideplot-core --target wasm32-unknown-unknown` (succeeds), `cargo build -p oxideplot-egui-legacy` (still builds). Commit: `refactor: move gpu_types + axis helpers to core, add geom view interaction`.
 
 ### Task 2.2: `PlotRenderer` owning device/queue/target
 
