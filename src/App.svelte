@@ -1,4 +1,4 @@
-<script>
+<script lang="ts">
   import svelteLogo from './assets/svelte.svg'
   import viteLogo from './assets/vite.svg'
   import heroImg from './assets/hero.png'
