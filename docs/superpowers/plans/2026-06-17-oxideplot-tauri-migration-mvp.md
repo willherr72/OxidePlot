@@ -76,6 +76,53 @@ OxidePlot/
 
 > Purpose: prove WebGPU works inside Tauri's WebView2, and that the existing wgpu engine runs as `wasm32` on a canvas, **before** porting real code. If 0.3 fails, fall back to driving WebGPU from TypeScript (reusing the WGSL verbatim) and revisit the plan.
 
+### Task 0.0: Restructure into a Cargo workspace (move legacy egui app)
+
+> Done first so `src/` is free for the Vite frontend scaffold and the workspace exists before any crate is added. Pure restructuring — the egui app must still build afterward.
+
+**Files:**
+- Move: `src/` → `crates/oxideplot-egui-legacy/src/`
+- Create: `crates/oxideplot-egui-legacy/Cargo.toml`
+- Modify: root `Cargo.toml` → `[workspace]`
+
+- [ ] **Step 1: Move the egui app out of `src/`**
+
+```bash
+mkdir -p crates/oxideplot-egui-legacy
+git mv src crates/oxideplot-egui-legacy/src
+```
+
+- [ ] **Step 2: Give the legacy crate its own manifest**
+
+Create `crates/oxideplot-egui-legacy/Cargo.toml` containing the ORIGINAL root `[package]` (rename `name` to `oxideplot-egui-legacy`, keep `version`/`edition`) and the ORIGINAL `[dependencies]` block verbatim (`eframe`, `egui`, `egui_extras`, `egui_plot`, `polars`, `calamine`, `csv`, `kiddo`, `glam`, `bytemuck`, `chrono`, `rfd`, `image`, `arboard`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`). The binary entry point stays `src/main.rs`.
+
+- [ ] **Step 3: Convert the root manifest to a workspace**
+
+Replace the entire root `Cargo.toml` with:
+
+```toml
+[workspace]
+resolver = "2"
+members = ["crates/oxideplot-egui-legacy"]
+
+[profile.release]
+opt-level = 3
+lto = true
+```
+
+(Other members — `oxideplot-core`, `oxideplot-wasm`, `src-tauri` — are appended as each is created in later tasks.)
+
+- [ ] **Step 4: Verify the egui app still builds**
+
+Run: `cargo build -p oxideplot-egui-legacy`
+Expected: succeeds (warnings OK). This is the parity-reference build for Phase 6.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -A && git commit -m "refactor: move egui app into oxideplot-egui-legacy workspace crate"
+```
+
 ### Task 0.1: Scaffold Tauri 2 + Svelte 5 project
 
 **Files:**
@@ -89,7 +136,7 @@ npm create vite@latest . -- --template svelte-ts
 npm install
 ```
 
-If prompted about the non-empty directory, choose "Ignore files and continue". Do NOT let it delete `crates/`, `docs/`, or `src/` from the legacy app — if the template wants to overwrite `src/`, scaffold into a temp dir and copy `package.json`, `vite.config.ts`, `index.html`, `src/main.ts`, `src/App.svelte` over manually.
+`src/` is now free (the egui app moved to `crates/` in Task 0.0), so the Svelte template can populate `src/` directly. If prompted about the non-empty directory (because `crates/`, `docs/`, `.git/` exist), choose "Ignore files and continue". Do NOT let it touch `crates/` or `docs/`.
 
 - [ ] **Step 2: Add Tauri**
 
@@ -175,21 +222,9 @@ git add -A && git commit -m "spike: confirm WebGPU available in WebView2 (TS tri
 - Create: `crates/oxideplot-wasm/Cargo.toml`, `crates/oxideplot-wasm/src/lib.rs`
 - Modify: `Cargo.toml` (workspace), `src/App.svelte`, `package.json` (wasm build script)
 
-- [ ] **Step 1: Make the root a Cargo workspace**
+- [ ] **Step 1: Register the wasm crate in the workspace**
 
-Replace root `Cargo.toml` `[package]`/`[dependencies]` with:
-
-```toml
-[workspace]
-resolver = "2"
-members = ["crates/oxideplot-core", "crates/oxideplot-wasm", "crates/oxideplot-egui-legacy", "src-tauri"]
-
-[profile.release]
-opt-level = 3
-lto = true
-```
-
-(The legacy crate move happens in Task 1.1; for this spike, temporarily list only `crates/oxideplot-wasm`.)
+The workspace root `Cargo.toml` already exists (Task 0.0). Append `"crates/oxideplot-wasm"` to its `members` array. Only list crates that exist; `oxideplot-core` is added in Task 1.1.
 
 - [ ] **Step 2: Create the wasm spike crate**
 
@@ -250,23 +285,15 @@ git add -A && git commit -m "spike: render wgpu-on-wasm triangle in webview (GO/
 
 > Move all non-egui logic into a library crate that builds for both native and `wasm32`. No behavior changes; this is pure restructuring plus characterization tests.
 
-### Task 1.1: Create the core crate and move the legacy app
+### Task 1.1: Create the `oxideplot-core` crate skeleton
+
+> The legacy app was already moved to its own crate in Task 0.0; this task only adds the empty core library.
 
 **Files:**
 - Create: `crates/oxideplot-core/Cargo.toml`, `crates/oxideplot-core/src/lib.rs`
-- Move: `src/` (entire current app) → `crates/oxideplot-egui-legacy/src/`; current root deps → `crates/oxideplot-egui-legacy/Cargo.toml`
 - Modify: root `Cargo.toml` workspace members
 
-- [ ] **Step 1: Move the egui app into a legacy crate**
-
-```bash
-mkdir -p crates/oxideplot-egui-legacy
-git mv src crates/oxideplot-egui-legacy/src
-```
-
-Create `crates/oxideplot-egui-legacy/Cargo.toml` = the ORIGINAL root `Cargo.toml` contents (package name `oxideplot-egui-legacy`, the full original `[dependencies]` block including `eframe`, `egui*`, `polars`, etc.), edition 2021. This keeps the egui build alive for parity comparison.
-
-- [ ] **Step 2: Create the core crate skeleton**
+- [ ] **Step 1: Create the core crate skeleton**
 
 `crates/oxideplot-core/Cargo.toml`:
 
@@ -301,19 +328,19 @@ pub mod render;
 
 (Modules are added in subsequent tasks; comment out `mod` lines until each exists so it compiles.)
 
-- [ ] **Step 3: Update workspace members**
+- [ ] **Step 2: Add the core crate to the workspace**
 
-Root `Cargo.toml` members: `["crates/oxideplot-core", "crates/oxideplot-wasm", "crates/oxideplot-egui-legacy", "src-tauri"]`. (Add `src-tauri` once Task 3.1 creates it; until then omit it.)
+Append `"crates/oxideplot-core"` to the `members` array in the root `Cargo.toml` (alongside the `oxideplot-egui-legacy` and `oxideplot-wasm` crates already present).
 
-- [ ] **Step 4: Verify both crates build**
+- [ ] **Step 3: Verify the core crate builds**
 
-Run: `cargo build -p oxideplot-egui-legacy && cargo build -p oxideplot-core`
-Expected: both succeed (core builds an empty lib).
+Run: `cargo build -p oxideplot-core`
+Expected: succeeds (an empty lib).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add -A && git commit -m "refactor: move egui app to legacy crate, add empty oxideplot-core"
+git add -A && git commit -m "feat: add empty oxideplot-core library crate"
 ```
 
 ### Task 1.2: Move `data/` into core (verbatim) + characterization tests
