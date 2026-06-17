@@ -94,7 +94,7 @@ git mv src crates/oxideplot-egui-legacy/src
 
 - [ ] **Step 2: Give the legacy crate its own manifest**
 
-Create `crates/oxideplot-egui-legacy/Cargo.toml` containing the ORIGINAL root `[package]` (rename `name` to `oxideplot-egui-legacy`, keep `version`/`edition`) and the ORIGINAL `[dependencies]` block verbatim (`eframe`, `egui`, `egui_extras`, `egui_plot`, `polars`, `calamine`, `csv`, `kiddo`, `glam`, `bytemuck`, `chrono`, `rfd`, `image`, `arboard`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`). The binary entry point stays `src/main.rs`.
+Create `crates/oxideplot-egui-legacy/Cargo.toml` containing the ORIGINAL root `[package]` (rename `name` to `oxideplot-egui-legacy`, keep `version`/`edition`) and the original `[dependencies]` block — **except drop `polars`** (it is unused, and the "No polars in any new crate" Global Constraint governs over a verbatim copy). The kept deps are: `eframe`, `egui`, `egui_extras`, `egui_plot`, `calamine`, `csv`, `kiddo`, `glam`, `bytemuck`, `chrono`, `rfd`, `image`, `arboard`, `serde`, `serde_json`, `tracing`, `tracing-subscriber`. The binary entry point stays `src/main.rs`.
 
 - [ ] **Step 3: Convert the root manifest to a workspace**
 
