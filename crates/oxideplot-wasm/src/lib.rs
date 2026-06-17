@@ -45,6 +45,7 @@ mod wasm_impl {
     /// xs must be in ascending order (standard time-series assumption).
     struct SourceSeries {
         name: String,
+        x_name: String,
         visible: bool,
         xs: Vec<f64>,
         ys: Vec<f64>,
@@ -89,6 +90,23 @@ mod wasm_impl {
     struct AxisTicks {
         x: Vec<TickEntry>,
         y: Vec<TickEntry>,
+    }
+
+    /// Format an f64 for CSV output: up to 15 significant-digit precision,
+    /// trailing zeros after the decimal point removed.
+    fn format_f64(v: f64) -> String {
+        if !v.is_finite() {
+            return String::new();
+        }
+        // Format with enough precision, then trim trailing zeros.
+        let s = format!("{:.15}", v);
+        if s.contains('.') {
+            let trimmed = s.trim_end_matches('0');
+            let trimmed = trimmed.trim_end_matches('.');
+            trimmed.to_string()
+        } else {
+            s
+        }
     }
 
     /// A GPU-accelerated 2D plot bound to an HTML canvas.
@@ -274,8 +292,10 @@ mod wasm_impl {
                 // Store FULL source data — no downsampling here.
                 // rebuild_visible() will LTTB-downsample to the visible range.
                 let name = data.columns[spec.y_col].clone();
+                let x_name = data.columns[spec.x_col].clone();
                 new_sources.push(SourceSeries {
                     name,
+                    x_name,
                     visible: true,
                     xs,
                     ys,
@@ -560,6 +580,66 @@ mod wasm_impl {
             self.point_radius = r;
             self.rebuild_visible();
             self.render();
+        }
+
+        // ── Export ────────────────────────────────────────────────────────────
+
+        /// Export all source series as a CSV string.
+        ///
+        /// The header row is the X column name (from the first series, or `"x"` if
+        /// no sources are loaded) followed by each series' Y name.  All sources are
+        /// assumed to share the same X axis; for row `i` the X value from each
+        /// source's own `xs[i]` is used (they are identical in practice).
+        ///
+        /// Data rows contain the full, un-downsampled values.  For row `i`:
+        /// - column 0: `sources[0].xs[i]` (or the per-series xs[i] if you track
+        ///   independent X axes — currently all sources share one X).
+        /// - column k+1: `sources[k].ys[i]`, or an empty cell if that series is
+        ///   shorter than the maximum length.
+        ///
+        /// f64 values are formatted with up to 15 significant digits, dropping
+        /// trailing zeros (`{:.15}` then trimmed).
+        #[wasm_bindgen]
+        pub fn export_csv(&self) -> String {
+            if self.sources.is_empty() {
+                return String::new();
+            }
+
+            // Header row
+            let x_header = self.sources[0].x_name.clone();
+            let mut rows: Vec<String> = Vec::new();
+            let header = std::iter::once(x_header)
+                .chain(self.sources.iter().map(|s| s.name.clone()))
+                .collect::<Vec<_>>()
+                .join(",");
+            rows.push(header);
+
+            // Determine the maximum row count across all series.
+            let max_len = self.sources.iter().map(|s| s.xs.len()).max().unwrap_or(0);
+
+            // Use the first source's xs as the shared X axis.
+            let ref_xs = &self.sources[0].xs;
+
+            for i in 0..max_len {
+                let x_val = if i < ref_xs.len() {
+                    format_f64(ref_xs[i])
+                } else {
+                    String::new()
+                };
+
+                let mut cols = vec![x_val];
+                for src in &self.sources {
+                    let y_val = if i < src.ys.len() {
+                        format_f64(src.ys[i])
+                    } else {
+                        String::new()
+                    };
+                    cols.push(y_val);
+                }
+                rows.push(cols.join(","));
+            }
+
+            rows.join("\n")
         }
 
         // ── Private helpers ───────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { pickFile, readFile } from './lib/api.js';
+  import { pickFile, readFile, saveFile } from './lib/api.js';
   import { Renderer } from './lib/renderer.js';
   import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from './lib/renderer.js';
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
@@ -259,6 +259,65 @@
   function handleCancel() {
     fileMeta = null;
   }
+
+  // ── Export ─────────────────────────────────────────────────────────────────
+
+  async function handleExportCsv() {
+    if (!hasData) return;
+    error = null;
+    try {
+      const csv = renderer.exportCsv();
+      const bytes = new TextEncoder().encode(csv);
+      await saveFile('oxideplot.csv', bytes);
+    } catch (e) {
+      error = `Export CSV failed: ${e}`;
+    }
+  }
+
+  async function handleExportPng() {
+    if (!hasData) return;
+    error = null;
+    try {
+      // Render immediately before capturing so the drawing buffer is current.
+      renderer.render();
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((b) => resolve(b), 'image/png');
+      });
+      if (!blob) {
+        error = 'PNG capture returned null — the WebGPU canvas may not support toBlob.';
+        return;
+      }
+      const arrayBuf = await blob.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuf);
+      await saveFile('oxideplot.png', bytes);
+    } catch (e) {
+      error = `Export PNG failed: ${e}`;
+    }
+  }
+
+  async function handleCopy() {
+    if (!hasData) return;
+    error = null;
+    try {
+      renderer.render();
+      const blob = await new Promise<Blob | null>((resolve) => {
+        canvas.toBlob((b) => resolve(b), 'image/png');
+      });
+      if (!blob) {
+        error = 'PNG capture returned null — clipboard copy unavailable.';
+        return;
+      }
+      if (typeof navigator.clipboard === 'undefined' || !navigator.clipboard.write) {
+        error = 'Clipboard API unavailable in this context.';
+        return;
+      }
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': blob }),
+      ]);
+    } catch (e) {
+      error = `Copy to clipboard failed: ${e}`;
+    }
+  }
 </script>
 
 <main>
@@ -298,6 +357,30 @@
       title="Toggle settings panel"
     >
       Settings
+    </button>
+    <button
+      class="cursor-btn"
+      disabled={!hasData}
+      on:click={handleExportCsv}
+      title="Export all series to CSV"
+    >
+      Export CSV
+    </button>
+    <button
+      class="cursor-btn"
+      disabled={!hasData}
+      on:click={handleExportPng}
+      title="Save plot as PNG (note: WebGPU canvas — verify image is not blank)"
+    >
+      Export PNG
+    </button>
+    <button
+      class="cursor-btn"
+      disabled={!hasData}
+      on:click={handleCopy}
+      title="Copy plot PNG to clipboard"
+    >
+      Copy
     </button>
     {#if filePath && !fileMeta}
       <span class="file-label" title={filePath}>

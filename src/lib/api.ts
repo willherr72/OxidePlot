@@ -25,3 +25,19 @@ export const pickFile = (): Promise<string | null> =>
  */
 export const readFile = (path: string): Promise<number[]> =>
   invoke<number[]>('read_file', { path });
+
+/**
+ * Open a native save-file dialog and write `contents` to the chosen path.
+ * Returns the saved path, or null if the user cancelled the dialog.
+ *
+ * The `contents` Uint8Array is serialised as a JSON number array for the
+ * Tauri bridge (Tauri deserialises it as `Vec<u8>` on the Rust side).
+ */
+export const saveFile = (
+  defaultName: string,
+  contents: Uint8Array,
+): Promise<string | null> =>
+  invoke<string | null>('save_file', {
+    defaultName,
+    contents: Array.from(contents),
+  });

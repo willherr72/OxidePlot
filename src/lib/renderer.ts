@@ -216,6 +216,20 @@ export class Renderer {
     (this.plot as any).set_point_radius(r);
   }
 
+  /**
+   * Export all loaded series as a CSV string.
+   *
+   * The header row contains the X column name followed by each series' Y name.
+   * Data rows contain full (un-downsampled) values; empty cells for series
+   * shorter than the longest one.
+   *
+   * Returns an empty string if no series have been loaded.
+   */
+  exportCsv(): string {
+    this.assertPlot();
+    return (this.plot as any).export_csv() as string;
+  }
+
   private assertPlot(): void {
     if (!this.plot) throw new Error('Renderer not created — call create(canvas) first');
   }
