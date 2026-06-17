@@ -437,6 +437,27 @@ mod wasm_impl {
             }
         }
 
+        /// Set the draw mode for all existing series and re-render.
+        ///
+        /// `mode` is one of `"lines"`, `"step"`, or `"points"`.
+        /// Unrecognised values fall back to `"lines"`.
+        ///
+        /// After updating every `SourceSeries`, `rebuild_visible()` is called
+        /// (re-applying viewport LTTB at the current zoom level) and then `render()`.
+        #[wasm_bindgen]
+        pub fn set_draw_mode(&mut self, mode: String) {
+            let draw_mode = match mode.as_str() {
+                "step" => DrawMode::Step,
+                "points" => DrawMode::Points,
+                _ => DrawMode::Lines,
+            };
+            for src in &mut self.sources {
+                src.draw_mode = draw_mode;
+            }
+            self.rebuild_visible();
+            self.render();
+        }
+
         /// Resize the renderer surface.  Call this from a ResizeObserver.
         pub fn resize(&mut self, w: u32, h: u32) {
             self.width = w;

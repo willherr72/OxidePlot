@@ -27,6 +27,26 @@
     }
   }
 
+  // ── Draw mode ──────────────────────────────────────────────────────────────
+  type DrawMode = 'lines' | 'step' | 'points';
+  const DRAW_MODES: DrawMode[] = ['lines', 'step', 'points'];
+  const DRAW_MODE_LABELS: Record<DrawMode, string> = { lines: 'Lines', step: 'Step', points: 'Points' };
+  let drawMode: DrawMode = 'lines';
+  let hasData = false;
+
+  function cycleDrawMode() {
+    if (!hasData) return;
+    const idx = DRAW_MODES.indexOf(drawMode);
+    drawMode = DRAW_MODES[(idx + 1) % DRAW_MODES.length];
+    renderer.setDrawMode(drawMode);
+    refreshView();
+  }
+
+  function handleFit() {
+    renderer.autoFit();
+    refreshView();
+  }
+
   // ── Cursor mode ────────────────────────────────────────────────────────────
   let cursorMode = false;
   let cursors: CursorPoint[] = [];
@@ -185,6 +205,8 @@
     error = null;
     try {
       renderer.setSeries(specs);
+      hasData = true;
+      drawMode = 'lines'; // reset to default on new data load
       refreshView();
     } catch (e) {
       error = `Failed to render series: ${e}`;
@@ -204,11 +226,27 @@
     </button>
     <button
       class="cursor-btn"
+      disabled={!hasData}
+      on:click={handleFit}
+      title="Re-fit view to all data (same as double-click)"
+    >
+      Fit
+    </button>
+    <button
+      class="cursor-btn"
       class:active={cursorMode}
       on:click={toggleCursorMode}
       title={cursorMode ? 'Cursor mode ON — click to place cursors (toggle off to clear)' : 'Cursor mode OFF'}
     >
       Cursors
+    </button>
+    <button
+      class="draw-mode-btn"
+      disabled={!hasData}
+      on:click={cycleDrawMode}
+      title="Cycle draw mode: Lines → Step → Points"
+    >
+      {DRAW_MODE_LABELS[drawMode]}
     </button>
     {#if filePath && !fileMeta}
       <span class="file-label" title={filePath}>
@@ -327,6 +365,29 @@
     background: #1a4a60;
     color: #00e5ff;
     border-color: #00b8d9;
+  }
+
+  .draw-mode-btn {
+    padding: 5px 14px;
+    background: #2a2a3a;
+    color: #b0b0cc;
+    border: 1px solid #44445a;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    min-width: 60px;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  .draw-mode-btn:hover:not(:disabled) {
+    background: #3a3a52;
+    color: #e0e0ff;
+  }
+
+  .draw-mode-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .file-label {

@@ -151,6 +151,15 @@ export class Renderer {
     return (this.plot as any).axis_ticks() as AxisTicksData;
   }
 
+  /**
+   * Set the draw mode for all existing series and re-render.
+   * @param mode - one of 'lines', 'step', or 'points'
+   */
+  setDrawMode(mode: 'lines' | 'step' | 'points'): void {
+    this.assertPlot();
+    this.plot!.set_draw_mode(mode);
+  }
+
   private assertPlot(): void {
     if (!this.plot) throw new Error('Renderer not created — call create(canvas) first');
   }
