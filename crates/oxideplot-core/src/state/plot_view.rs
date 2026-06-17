@@ -163,4 +163,59 @@ impl PlotViewState {
         self.x_min = min;
         self.x_max = max;
     }
+
+    /// Pan the view by a pixel drag delta.
+    pub fn pan(&mut self, dx_px: f32, dy_px: f32, rect: crate::geom::Rect) {
+        let dx = -(dx_px as f64) * (self.x_max - self.x_min) / rect.width as f64;
+        let dy = (dy_px as f64) * (self.y_max - self.y_min) / rect.height as f64;
+        self.x_min += dx; self.x_max += dx; self.y_min += dy; self.y_max += dy;
+        self.auto_fit = false;
+    }
+
+    /// Zoom about a screen-space anchor using a scroll delta.
+    pub fn zoom(&mut self, scroll_y: f32, anchor: crate::geom::Pos2, rect: crate::geom::Rect) {
+        let zoom_factor = (1.0 - (scroll_y as f64) * 0.001).clamp(0.5, 2.0);
+        let (cx, cy) = self.screen_to_data(anchor, rect);
+        self.x_min = cx + (self.x_min - cx) * zoom_factor;
+        self.x_max = cx + (self.x_max - cx) * zoom_factor;
+        self.y_min = cy + (self.y_min - cy) * zoom_factor;
+        self.y_max = cy + (self.y_max - cy) * zoom_factor;
+        self.auto_fit = false;
+    }
+
+    /// Screen pixel position within `rect` -> data coordinates.
+    pub fn screen_to_data(&self, pos: crate::geom::Pos2, rect: crate::geom::Rect) -> (f64, f64) {
+        let t_x = (pos.x - rect.left) as f64 / rect.width as f64;
+        let t_y = 1.0 - (pos.y - rect.top) as f64 / rect.height as f64;
+        (self.x_min + t_x * (self.x_max - self.x_min), self.y_min + t_y * (self.y_max - self.y_min))
+    }
+
+    /// Data coordinates -> screen pixel position within `rect`.
+    pub fn data_to_screen(&self, x: f64, y: f64, rect: crate::geom::Rect) -> crate::geom::Pos2 {
+        let t_x = (x - self.x_min) / (self.x_max - self.x_min);
+        let t_y = 1.0 - (y - self.y_min) / (self.y_max - self.y_min);
+        crate::geom::Pos2 { x: rect.left + (t_x as f32) * rect.width, y: rect.top + (t_y as f32) * rect.height }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geom::Rect;
+
+    #[test]
+    fn pan_shifts_view_left() {
+        let mut v = PlotViewState { x_min: 0.0, x_max: 10.0, y_min: 0.0, y_max: 10.0, ..Default::default() };
+        v.pan(10.0, 0.0, Rect { left: 0.0, top: 0.0, width: 100.0, height: 100.0 });
+        assert!(v.x_min < 0.0 && v.x_max < 10.0, "drag-right should move the view left");
+    }
+
+    #[test]
+    fn screen_data_roundtrip() {
+        let v = PlotViewState { x_min: 0.0, x_max: 10.0, y_min: 0.0, y_max: 10.0, ..Default::default() };
+        let r = Rect { left: 0.0, top: 0.0, width: 100.0, height: 100.0 };
+        let p = v.data_to_screen(5.0, 5.0, r);
+        let (dx, dy) = v.screen_to_data(p, r);
+        assert!((dx - 5.0).abs() < 1e-9 && (dy - 5.0).abs() < 1e-9);
+    }
 }

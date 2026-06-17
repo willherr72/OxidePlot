@@ -10,6 +10,20 @@ use crate::render::plot_interaction::PlotViewStateExt;
 use crate::plot3d::renderer::create_3d_paint_callback;
 use crate::plot3d::camera::OrbitalCameraExt;
 
+// ---------------------------------------------------------------------------
+// egui <-> geom conversion helpers (used when calling core PlotViewState methods)
+// ---------------------------------------------------------------------------
+
+fn to_geom_rect(r: egui::Rect) -> oxideplot_core::geom::Rect {
+    oxideplot_core::geom::Rect { left: r.min.x, top: r.min.y, width: r.width(), height: r.height() }
+}
+fn to_geom_pos(p: egui::Pos2) -> oxideplot_core::geom::Pos2 {
+    oxideplot_core::geom::Pos2 { x: p.x, y: p.y }
+}
+fn geom_to_egui_pos(p: oxideplot_core::geom::Pos2) -> egui::Pos2 {
+    egui::pos2(p.x, p.y)
+}
+
 /// Actions that the graph panel can request from the parent.
 pub enum GraphAction {
     None,
@@ -959,7 +973,7 @@ fn draw_axes_and_labels(
         if !is_major {
             continue;
         }
-        let screen_x = pv.data_to_screen(xval, pv.y_min, plot_rect).x;
+        let screen_x = pv.data_to_screen(xval, pv.y_min, to_geom_rect(plot_rect)).x;
         if screen_x < plot_rect.left() || screen_x > plot_rect.right() {
             continue;
         }
@@ -1007,7 +1021,7 @@ fn draw_axes_and_labels(
                 if !is_major {
                     continue;
                 }
-                let screen_y = pv.data_to_screen(pv.x_min, yval, plot_rect).y;
+                let screen_y = pv.data_to_screen(pv.x_min, yval, to_geom_rect(plot_rect)).y;
                 if screen_y < plot_rect.top() || screen_y > plot_rect.bottom() {
                     continue;
                 }
@@ -1063,7 +1077,7 @@ fn draw_axes_and_labels(
             if !is_major {
                 continue;
             }
-            let screen_y = pv.data_to_screen(pv.x_min, yval, plot_rect).y;
+            let screen_y = pv.data_to_screen(pv.x_min, yval, to_geom_rect(plot_rect)).y;
             if screen_y < plot_rect.top() || screen_y > plot_rect.bottom() {
                 continue;
             }
@@ -1170,7 +1184,7 @@ fn draw_hover_tooltip(
     unit_ranges: &[UnitRange],
 ) {
     let pv = &graph.plot_view;
-    let (mouse_data_x, mouse_data_y) = pv.screen_to_data(mouse_pos, plot_rect);
+    let (mouse_data_x, mouse_data_y) = pv.screen_to_data(to_geom_pos(mouse_pos), to_geom_rect(plot_rect));
 
     // Normalize mouse coordinates by axis range so distance is comparable
     let x_span = (pv.x_max - pv.x_min).max(1e-15);
@@ -1221,7 +1235,7 @@ fn draw_hover_tooltip(
                         best_label = series.label.clone();
                         best_x = xv;
                         best_y_display = series.y[i]; // real value for display
-                        best_screen_pos = pv.data_to_screen(xv, yv_norm, plot_rect);
+                        best_screen_pos = geom_to_egui_pos(pv.data_to_screen(xv, yv_norm, to_geom_rect(plot_rect)));
                         best_color = egui::Color32::from_rgba_unmultiplied(series.color[0], series.color[1], series.color[2], series.color[3]);
                     }
                 }
@@ -1241,7 +1255,7 @@ fn draw_hover_tooltip(
                     best_label = series.label.clone();
                     best_x = xv;
                     best_y_display = yv;
-                    best_screen_pos = pv.data_to_screen(xv, yv, plot_rect);
+                    best_screen_pos = geom_to_egui_pos(pv.data_to_screen(xv, yv, to_geom_rect(plot_rect)));
                     best_color = egui::Color32::from_rgba_unmultiplied(series.color[0], series.color[1], series.color[2], series.color[3]);
                 }
             }
@@ -1295,7 +1309,7 @@ fn handle_cursor_click(graph: &mut GraphState, response: &egui::Response, plot_r
     if response.secondary_clicked() {
         if let Some(mouse_pos) = response.interact_pointer_pos() {
             let pv = &graph.plot_view;
-            let (data_x, data_y) = pv.screen_to_data(mouse_pos, plot_rect);
+            let (data_x, data_y) = pv.screen_to_data(to_geom_pos(mouse_pos), to_geom_rect(plot_rect));
 
             let val = match graph.cursor_state.mode {
                 CursorMode::Vertical => data_x,
@@ -1336,7 +1350,7 @@ fn draw_cursors(
                 if let Some(x) = *pos {
                     let color = CURSOR_COLORS[i];
                     let stroke = egui::Stroke::new(1.5, color);
-                    let screen_x = pv.data_to_screen(x, pv.y_min, plot_rect).x;
+                    let screen_x = pv.data_to_screen(x, pv.y_min, to_geom_rect(plot_rect)).x;
                     if screen_x >= plot_rect.left() && screen_x <= plot_rect.right() {
                         painter.line_segment(
                             [egui::Pos2::new(screen_x, plot_rect.top()),
@@ -1363,7 +1377,7 @@ fn draw_cursors(
                 if let Some(y) = *pos {
                     let color = CURSOR_COLORS[i];
                     let stroke = egui::Stroke::new(1.5, color);
-                    let screen_y = pv.data_to_screen(pv.x_min, y, plot_rect).y;
+                    let screen_y = pv.data_to_screen(pv.x_min, y, to_geom_rect(plot_rect)).y;
                     if screen_y >= plot_rect.top() && screen_y <= plot_rect.bottom() {
                         painter.line_segment(
                             [egui::Pos2::new(plot_rect.left(), screen_y),

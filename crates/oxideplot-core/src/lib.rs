@@ -3,4 +3,4 @@ pub mod geom;
 pub mod data;
 pub mod processing;
 pub mod state;
-// pub mod render;
+pub mod render;
