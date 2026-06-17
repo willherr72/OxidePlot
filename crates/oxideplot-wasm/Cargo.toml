@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
+serde-wasm-bindgen = "0.6"
 
 # wasm32-only dependencies — wgpu webgpu surface only exists on wasm
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -3,7 +3,9 @@
 // HtmlCanvasElement and drives `oxideplot_core::render::renderer::PlotRenderer`
 // to render hard-coded plot data.
 //
-// The Phase 0 `run_triangle` spike is fully replaced here.
+// Task 3.2 — adds `load_file_bytes` which parses CSV/Excel bytes via the core
+// loader and returns column metadata as a JS object.  The parsed `LoadedData`
+// is stored in `self.loaded` for Task 3.3 (series construction).
 
 use wasm_bindgen::prelude::*;
 
@@ -14,6 +16,7 @@ mod wasm_impl {
     use super::*;
     use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
     use oxideplot_core::render::renderer::PlotRenderer;
+    use oxideplot_core::data::loader::{LoadedData, FileMeta, load_from_bytes};
 
     /// A GPU-accelerated 2D plot bound to an HTML canvas.
     ///
@@ -30,6 +33,8 @@ mod wasm_impl {
         grid: GridGpuData,
         width: u32,
         height: u32,
+        /// Parsed data stored here for Task 3.3 (set_series / series building).
+        loaded: Option<LoadedData>,
     }
 
     #[wasm_bindgen]
@@ -117,7 +122,36 @@ mod wasm_impl {
                 grid,
                 width,
                 height,
+                loaded: None,
             }
+        }
+
+        /// Parse file bytes and return column metadata as a JS object.
+        ///
+        /// `bytes`    — raw file contents (passed from the Tauri `read_file` command).
+        /// `filename` — original filename (used for extension-based dispatch: .csv / .xlsx / .xls).
+        ///
+        /// Returns `{ columns: [{ name: string }, ...], rows: number }` on success,
+        /// or a JS string error on failure.
+        ///
+        /// The parsed data is stored internally in `self.loaded` so that Task 3.3
+        /// can call `set_series` to build GPU series from a chosen column pair.
+        #[wasm_bindgen]
+        pub fn load_file_bytes(
+            &mut self,
+            bytes: Vec<u8>,
+            filename: String,
+        ) -> Result<JsValue, JsValue> {
+            let data = load_from_bytes(&bytes, &filename)
+                .map_err(|e| JsValue::from_str(&e))?;
+
+            let meta = FileMeta::from_loaded(&data);
+
+            // Store parsed data for Task 3.3 (series construction).
+            self.loaded = Some(data);
+
+            serde_wasm_bindgen::to_value(&meta)
+                .map_err(|e| JsValue::from_str(&e.to_string()))
         }
 
         /// Render one frame: build draw calls then present to the canvas.

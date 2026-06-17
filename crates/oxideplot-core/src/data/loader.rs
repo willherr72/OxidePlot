@@ -8,6 +8,43 @@ pub struct LoadedData {
     pub row_count: usize,
 }
 
+/// Metadata struct for the WASM boundary — serializable column+row summary.
+#[derive(serde::Serialize)]
+pub struct ColumnMeta {
+    pub name: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct FileMeta {
+    pub columns: Vec<ColumnMeta>,
+    pub rows: usize,
+}
+
+impl FileMeta {
+    pub fn from_loaded(data: &LoadedData) -> Self {
+        FileMeta {
+            columns: data.columns.iter().map(|n| ColumnMeta { name: n.clone() }).collect(),
+            rows: data.row_count,
+        }
+    }
+}
+
+/// Load from raw bytes, dispatching by the extension of `filename`.
+/// This is the primary entry point for the WASM path (bytes already read by Tauri/JS).
+pub fn load_from_bytes(bytes: &[u8], filename: &str) -> Result<LoadedData, String> {
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    match ext.as_str() {
+        "csv" => load_csv_from_bytes(bytes),
+        "xls" | "xlsx" => load_excel_from_bytes(bytes),
+        _ => Err(format!("Unsupported file format: .{ext}")),
+    }
+}
+
 /// Load a CSV or Excel file and return the column names and raw string data.
 pub fn load_file(path: &Path) -> Result<LoadedData, String> {
     let ext = path.extension()
@@ -22,13 +59,12 @@ pub fn load_file(path: &Path) -> Result<LoadedData, String> {
     }
 }
 
-fn load_csv(path: &Path) -> Result<LoadedData, String> {
-    let header_row = parser::detect_csv_header(path, b',', 50)?;
+/// Parse CSV from raw bytes (core implementation).
+pub fn load_csv_from_bytes(bytes: &[u8]) -> Result<LoadedData, String> {
+    let header_row = parser::detect_csv_header_from_bytes(bytes, b',', 50)?;
 
-    // Read the file bytes
-    let content = std::fs::read(path).map_err(|e| format!("Cannot read file: {e}"))?;
-    let text = String::from_utf8(content.clone())
-        .unwrap_or_else(|_| content.iter().map(|&b| b as char).collect());
+    let text = String::from_utf8(bytes.to_vec())
+        .unwrap_or_else(|_| bytes.iter().map(|&b| b as char).collect());
 
     let mut reader = csv::ReaderBuilder::new()
         .delimiter(b',')
@@ -50,16 +86,13 @@ fn load_csv(path: &Path) -> Result<LoadedData, String> {
         return Err("No data found after header detection".to_string());
     }
 
-    // Extract column names from header row
     let columns: Vec<String> = all_rows[header_row].iter()
         .map(|s| s.trim().to_string())
         .collect();
 
-    // Data starts after header row
     let data_rows = &all_rows[header_row + 1..];
     let num_cols = columns.len();
 
-    // Convert to column-major format
     let mut column_data: Vec<Vec<String>> = vec![Vec::new(); num_cols];
     let row_count = data_rows.len();
 
@@ -76,19 +109,35 @@ fn load_csv(path: &Path) -> Result<LoadedData, String> {
     Ok(LoadedData { columns, column_data, row_count })
 }
 
-fn load_excel(path: &Path) -> Result<LoadedData, String> {
-    use calamine::{open_workbook_auto, Reader, Data};
+/// Path-based shim: read file then delegate to load_csv_from_bytes (legacy support).
+fn load_csv(path: &Path) -> Result<LoadedData, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read file: {e}"))?;
+    load_csv_from_bytes(&bytes)
+}
 
-    let header_row = parser::detect_excel_header(path, 50)?;
+/// Parse Excel from raw bytes using calamine's reader-based API.
+pub fn load_excel_from_bytes(bytes: &[u8]) -> Result<LoadedData, String> {
+    use calamine::{Reader, Data};
+    use std::io::Cursor;
 
-    let mut workbook = open_workbook_auto(path)
-        .map_err(|e| format!("Cannot open Excel file: {e}"))?;
+    let cursor = Cursor::new(bytes.to_vec());
+    let mut workbook = calamine::open_workbook_auto_from_rs(cursor)
+        .map_err(|e| format!("Cannot open Excel file from bytes: {e}"))?;
 
-    let sheet_name = workbook.sheet_names().first()
+    let header_row = parser::detect_excel_header_from_workbook(&mut workbook, 50)?;
+
+    // Re-open since we consumed the workbook for header detection — reset by re-creating
+    // Actually we can't seek back; instead detect header first then re-open.
+    // Workaround: re-create from the same bytes.
+    let cursor2 = Cursor::new(bytes.to_vec());
+    let mut workbook2 = calamine::open_workbook_auto_from_rs(cursor2)
+        .map_err(|e| format!("Cannot re-open Excel file from bytes: {e}"))?;
+
+    let sheet_name = workbook2.sheet_names().first()
         .ok_or("No sheets found")?
         .clone();
 
-    let range = workbook.worksheet_range(&sheet_name)
+    let range = workbook2.worksheet_range(&sheet_name)
         .map_err(|e| format!("Cannot read sheet: {e}"))?;
 
     let all_rows: Vec<Vec<String>> = range.rows().map(|row| {
@@ -133,6 +182,12 @@ fn load_excel(path: &Path) -> Result<LoadedData, String> {
     Ok(LoadedData { columns, column_data, row_count })
 }
 
+/// Path-based shim: read file then delegate to load_excel_from_bytes (legacy support).
+fn load_excel(path: &Path) -> Result<LoadedData, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read file: {e}"))?;
+    load_excel_from_bytes(&bytes)
+}
+
 /// Extract numeric f64 values from a string column.
 /// Returns (values, fraction_valid) where invalid entries become NaN.
 pub fn column_to_f64(data: &[String]) -> (Vec<f64>, f64) {
@@ -175,5 +230,34 @@ pub fn column_to_timestamps(data: &[String]) -> Option<(Vec<f64>, f64)> {
         Some((timestamps, frac))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_csv_from_bytes_detects_columns() {
+        let csv = b"time,temp\n0,20.0\n1,21.5\n";
+        let d = load_from_bytes(csv, "x.csv").unwrap();
+        assert_eq!(d.columns, vec!["time".to_string(), "temp".to_string()]);
+        assert_eq!(d.row_count, 2);
+    }
+
+    #[test]
+    fn file_meta_from_loaded() {
+        let csv = b"x,y,z\n1,2,3\n4,5,6\n";
+        let d = load_from_bytes(csv, "data.csv").unwrap();
+        let meta = FileMeta::from_loaded(&d);
+        assert_eq!(meta.columns.len(), 3);
+        assert_eq!(meta.rows, 2);
+        assert_eq!(meta.columns[0].name, "x");
+    }
+
+    #[test]
+    fn unsupported_extension_errors() {
+        let result = load_from_bytes(b"data", "file.json");
+        assert!(result.is_err());
     }
 }

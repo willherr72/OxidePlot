@@ -1,16 +1,12 @@
 use std::path::Path;
 use std::collections::HashMap;
 
-/// Detect header row index in a CSV file.
+/// Detect header row index from raw CSV bytes.
 /// Returns the 0-based row index of the header row.
-pub fn detect_csv_header(filepath: &Path, delimiter: u8, max_lines: usize) -> Result<usize, String> {
-    // Try UTF-8 first, then latin1 (read as bytes and convert)
-    let content = std::fs::read(filepath).map_err(|e| format!("Cannot read file: {e}"))?;
-
-    let text = String::from_utf8(content.clone())
+pub fn detect_csv_header_from_bytes(bytes: &[u8], delimiter: u8, max_lines: usize) -> Result<usize, String> {
+    let text = String::from_utf8(bytes.to_vec())
         .unwrap_or_else(|_| {
-            // Fallback: treat as latin1 (each byte maps to same Unicode code point)
-            content.iter().map(|&b| b as char).collect()
+            bytes.iter().map(|&b| b as char).collect()
         });
 
     let mut reader = csv::ReaderBuilder::new()
@@ -58,12 +54,10 @@ pub fn detect_csv_header(filepath: &Path, delimiter: u8, max_lines: usize) -> Re
                 has_content = false;
                 break;
             }
-            // Try to parse as float
             if trimmed.parse::<f64>().is_ok() {
                 all_strings = false;
                 break;
             }
-            // Check if it looks like a date
             if is_date_like(trimmed) {
                 all_strings = false;
                 break;
@@ -78,7 +72,52 @@ pub fn detect_csv_header(filepath: &Path, delimiter: u8, max_lines: usize) -> Re
     Ok(0)
 }
 
-/// Detect header row index in an Excel file.
+/// Detect header row index in a CSV file (path-based shim — reads file then delegates).
+pub fn detect_csv_header(filepath: &Path, delimiter: u8, max_lines: usize) -> Result<usize, String> {
+    let content = std::fs::read(filepath).map_err(|e| format!("Cannot read file: {e}"))?;
+    detect_csv_header_from_bytes(&content, delimiter, max_lines)
+}
+
+/// Detect header row from an already-open calamine workbook (used by bytes path).
+pub fn detect_excel_header_from_workbook<RS>(
+    workbook: &mut calamine::Sheets<RS>,
+    max_rows: usize,
+) -> Result<usize, String>
+where
+    RS: std::io::Read + std::io::Seek,
+{
+    use calamine::{Reader, Data};
+
+    let sheet_name = workbook.sheet_names().first()
+        .ok_or("No sheets found")?
+        .clone();
+
+    let range = workbook.worksheet_range(&sheet_name)
+        .map_err(|e| format!("Cannot read sheet: {e}"))?;
+
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    for (i, row) in range.rows().enumerate() {
+        if i >= max_rows { break; }
+        let cells: Vec<Option<String>> = row.iter().map(|cell| {
+            match cell {
+                Data::Empty => None,
+                Data::String(s) => Some(s.clone()),
+                Data::Float(f) => Some(f.to_string()),
+                Data::Int(i) => Some(i.to_string()),
+                Data::Bool(b) => Some(b.to_string()),
+                Data::DateTime(dt) => Some(dt.to_string()),
+                Data::DateTimeIso(s) => Some(s.clone()),
+                Data::DurationIso(s) => Some(s.clone()),
+                Data::Error(e) => Some(format!("{e:?}")),
+            }
+        }).collect();
+        rows.push(cells);
+    }
+
+    detect_header_from_rows(&rows)
+}
+
+/// Detect header row index in an Excel file (path-based shim).
 pub fn detect_excel_header(filepath: &Path, max_rows: usize) -> Result<usize, String> {
     use calamine::{open_workbook_auto, Reader, Data};
 
@@ -111,17 +150,20 @@ pub fn detect_excel_header(filepath: &Path, max_rows: usize) -> Result<usize, St
         rows.push(cells);
     }
 
+    detect_header_from_rows(&rows)
+}
+
+/// Shared logic: given rows of optional-string cells, find the header row index.
+fn detect_header_from_rows(rows: &[Vec<Option<String>>]) -> Result<usize, String> {
     if rows.is_empty() {
         return Err("No data in sheet".to_string());
     }
 
-    // Count non-empty columns
     let used_cols = rows.iter()
         .flat_map(|row| row.iter().enumerate().filter(|(_, c)| c.is_some()).map(|(i, _)| i))
         .collect::<std::collections::HashSet<_>>()
         .len();
 
-    // Scan from bottom up
     for i in (0..rows.len()).rev() {
         let row = &rows[i];
         let non_empty_count = row.iter().filter(|c| c.is_some()).count();
@@ -130,7 +172,6 @@ pub fn detect_excel_header(filepath: &Path, max_rows: usize) -> Result<usize, St
         let mut all_strings = true;
         for cell in row {
             if let Some(val) = cell {
-                // If it parses as a number, it's not a header
                 if val.parse::<f64>().is_ok() {
                     all_strings = false;
                     break;
@@ -151,7 +192,6 @@ pub fn detect_excel_header(filepath: &Path, max_rows: usize) -> Result<usize, St
 }
 
 fn is_date_like(s: &str) -> bool {
-    // Check for date-like patterns
     let has_separators = s.contains('/') || s.contains(':');
     let has_date_words = s.to_lowercase().contains("am") || s.to_lowercase().contains("pm");
 
@@ -159,7 +199,6 @@ fn is_date_like(s: &str) -> bool {
         return false;
     }
 
-    // Try to parse with chrono
     use chrono::NaiveDateTime;
     let formats = [
         "%Y-%m-%d %H:%M:%S",
