@@ -105,7 +105,7 @@
   .overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.7);
+    background: var(--dialog-overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -113,27 +113,27 @@
   }
 
   .dialog {
-    background: #1e1e28;
-    border: 1px solid #3a3a50;
+    background: var(--dialog-bg);
+    border: 1px solid var(--border-mid);
     border-radius: 10px;
     padding: 24px 28px;
     min-width: 360px;
     max-width: 520px;
-    color: #e0e0ee;
+    color: var(--dialog-text);
     font-family: sans-serif;
-    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
   }
 
   h2 {
     margin: 0 0 4px;
     font-size: 1.2rem;
-    color: #ffffff;
+    color: var(--dialog-h2);
   }
 
   .subtitle {
     margin: 0 0 18px;
     font-size: 0.8rem;
-    color: #7a7a9a;
+    color: var(--dialog-subtitle);
   }
 
   .section {
@@ -145,7 +145,7 @@
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: #8888aa;
+    color: var(--dialog-section-title);
     margin-bottom: 8px;
   }
 
@@ -168,11 +168,11 @@
   }
 
   .col-row:hover:not(.disabled) {
-    background: #2a2a3a;
+    background: var(--col-row-hover);
   }
 
   .col-row.selected {
-    background: #252540;
+    background: var(--col-row-selected);
   }
 
   .col-row.disabled {
@@ -192,18 +192,18 @@
   }
 
   .kind-numeric {
-    background: #1a3a1a;
-    color: #60dd60;
+    background: var(--col-kind-numeric-bg);
+    color: var(--col-kind-numeric-text);
   }
 
   .kind-datetime {
-    background: #1a2a3a;
-    color: #60aadd;
+    background: var(--col-kind-datetime-bg);
+    color: var(--col-kind-datetime-text);
   }
 
   .kind-text {
-    background: #3a2a1a;
-    color: #ddaa60;
+    background: var(--col-kind-text-bg);
+    color: var(--col-kind-text-text);
   }
 
   .actions {
@@ -228,12 +228,12 @@
   }
 
   .btn-cancel {
-    background: #2e2e44;
-    color: #aaaacc;
+    background: var(--btn-cancel-bg);
+    color: var(--btn-cancel-text);
   }
 
   .btn-confirm {
-    background: #3060c0;
+    background: var(--accent);
     color: #ffffff;
   }
 </style>

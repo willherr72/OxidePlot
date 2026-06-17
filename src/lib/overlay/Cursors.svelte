@@ -8,6 +8,9 @@
    * Cursor positions are stored in DATA coordinates so they stay pinned to the
    * data when panning or zooming — the overlay re-renders when viewState changes.
    *
+   * Colors use CSS custom properties (--cursor-readout-bg etc.) so the component
+   * responds to the active data-theme automatically.
+   *
    * pointer-events: none so all mouse events pass through to the canvas.
    */
 
@@ -87,7 +90,7 @@
       r="4"
       fill={color}
       opacity="0.9"
-      stroke="rgba(10,10,18,0.7)"
+      stroke="var(--cursor-dot-stroke)"
       stroke-width="1"
     />
   {/each}
@@ -117,13 +120,13 @@
     position: absolute;
     top: 10px;
     right: 10px;
-    background: rgba(10, 10, 20, 0.82);
-    border: 1px solid rgba(180, 180, 220, 0.25);
+    background: var(--cursor-readout-bg);
+    border: 1px solid var(--cursor-readout-border);
     border-radius: 6px;
     padding: 7px 10px;
     font-family: monospace;
     font-size: 11px;
-    color: #d0d0ee;
+    color: var(--cursor-readout-text);
     min-width: 200px;
     user-select: none;
   }
@@ -141,20 +144,20 @@
   }
 
   .cursor-vals {
-    color: #c0c0dd;
+    color: var(--cursor-readout-vals);
     white-space: pre;
   }
 
   .cursor-divider {
-    border-top: 1px solid rgba(180, 180, 220, 0.2);
+    border-top: 1px solid var(--cursor-divider);
     margin: 3px 0;
   }
 
   .delta .cursor-label {
-    color: #aaaacc;
+    color: var(--cursor-delta-label);
   }
 
   .delta .cursor-vals {
-    color: #e0e0ff;
+    color: var(--cursor-delta-vals);
   }
 </style>

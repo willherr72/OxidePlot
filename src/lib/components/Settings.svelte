@@ -11,6 +11,8 @@
    *   - linewidth: { value: number }
    *   - pointradius: { value: number }
    *   - showgrid: { value: boolean }
+   *
+   * Colors use CSS custom properties so the panel responds to data-theme.
    */
   import { createEventDispatcher } from 'svelte';
 
@@ -89,13 +91,13 @@
     top: 8px;
     right: 8px;
     z-index: 100;
-    background: #16161e;
-    border: 1px solid #2a2a3a;
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px 16px;
     min-width: 220px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-    color: #c0c0d8;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    color: var(--text-dim);
     font-family: sans-serif;
     font-size: 0.82rem;
   }
@@ -103,7 +105,7 @@
   .settings-header {
     font-size: 0.88rem;
     font-weight: 700;
-    color: #a0a0cc;
+    color: var(--settings-header);
     margin-bottom: 10px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -120,7 +122,7 @@
   .setting-row label {
     flex-shrink: 0;
     min-width: 90px;
-    color: #a8a8c4;
+    color: var(--settings-label);
   }
 
   .input-group {
@@ -132,13 +134,13 @@
 
   input[type="range"] {
     flex: 1;
-    accent-color: #4a80e8;
+    accent-color: var(--accent);
     cursor: pointer;
   }
 
   .val-label {
     font-size: 0.78rem;
-    color: #7878a0;
+    color: var(--settings-val);
     min-width: 28px;
     text-align: right;
   }
@@ -150,7 +152,7 @@
   input[type="checkbox"] {
     width: 15px;
     height: 15px;
-    accent-color: #4a80e8;
+    accent-color: var(--accent);
     cursor: pointer;
     margin-right: auto;
   }

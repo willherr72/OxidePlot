@@ -85,8 +85,8 @@
     position: absolute;
     top: 8px;
     right: 8px;
-    background: rgba(20, 20, 30, 0.88);
-    border: 1px solid #3a3a50;
+    background: var(--panel-bg-alpha);
+    border: 1px solid var(--border-mid);
     border-radius: 8px;
     min-width: 180px;
     max-width: 260px;
@@ -95,8 +95,8 @@
     flex-direction: column;
     font-family: sans-serif;
     font-size: 0.8rem;
-    color: #c0c0de;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    color: var(--text-dim);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
     z-index: 20;
     overflow: hidden;
     backdrop-filter: blur(4px);
@@ -107,8 +107,8 @@
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: #8888aa;
-    border-bottom: 1px solid #2a2a3a;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
 
@@ -128,7 +128,7 @@
   }
 
   .series-row:hover {
-    background: rgba(60, 60, 90, 0.4);
+    background: var(--series-row-hover);
   }
 
   .series-row.hidden {
@@ -141,7 +141,7 @@
     height: 10px;
     border-radius: 2px;
     flex-shrink: 0;
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    border: 1px solid var(--swatch-border);
   }
 
   .series-name {
@@ -150,7 +150,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 0.78rem;
-    color: #d0d0ee;
+    color: var(--series-name-text);
   }
 
   .controls {
@@ -162,7 +162,7 @@
   .ctrl-btn {
     background: transparent;
     border: none;
-    color: #8888aa;
+    color: var(--series-ctrl-btn);
     cursor: pointer;
     padding: 1px 4px;
     font-size: 0.8rem;
@@ -172,8 +172,8 @@
   }
 
   .ctrl-btn:hover:not(:disabled) {
-    background: rgba(80, 80, 120, 0.5);
-    color: #e0e0ff;
+    background: var(--series-ctrl-hover-bg);
+    color: var(--btn-hover-text);
   }
 
   .ctrl-btn:disabled {

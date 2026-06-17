@@ -148,6 +148,8 @@ mod wasm_impl {
         line_width: f32,
         /// Point radius for all series (default 3.0).
         point_radius: f32,
+        /// Background clear color [r, g, b, a]. Default: dark (#1a1a1f).
+        bg_color: [f64; 4],
     }
 
     #[wasm_bindgen]
@@ -202,6 +204,7 @@ mod wasm_impl {
                 x_is_time: false,
                 line_width: 2.0,
                 point_radius: 3.0,
+                bg_color: [0.10_f64, 0.10, 0.12, 1.0],
             }
         }
 
@@ -463,7 +466,7 @@ mod wasm_impl {
                     _padding: [0.0; 4],
                 };
                 let calls = self.renderer.build_draw_calls(&[], &self.grid, uniforms);
-                if let Err(e) = self.renderer.render(&calls, [0.10, 0.10, 0.12, 1.0]) {
+                if let Err(e) = self.renderer.render(&calls, self.bg_color) {
                     web_sys::console::error_1(&format!("OxidePlot render error: {e:?}").into());
                 }
                 return;
@@ -481,10 +484,18 @@ mod wasm_impl {
 
             let calls = self.renderer.build_draw_calls(&self.series, &self.grid, uniforms);
 
-            // Dark background (#1a1a1f ≈ 0.10, 0.10, 0.12)
-            if let Err(e) = self.renderer.render(&calls, [0.10, 0.10, 0.12, 1.0]) {
+            if let Err(e) = self.renderer.render(&calls, self.bg_color) {
                 web_sys::console::error_1(&format!("OxidePlot render error: {e:?}").into());
             }
+        }
+
+        /// Set the plot background clear colour and re-render.
+        ///
+        /// Call this whenever the theme changes.  Values are linear RGB in [0, 1].
+        /// Dark default: (0.10, 0.10, 0.12, 1.0); light: (0.97, 0.97, 0.98, 1.0).
+        #[wasm_bindgen]
+        pub fn set_background(&mut self, r: f32, g: f32, b: f32, a: f32) {
+            self.bg_color = [r as f64, g as f64, b as f64, a as f64];
         }
 
         /// Set the draw mode for all existing series and re-render.

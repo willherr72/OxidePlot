@@ -6,6 +6,10 @@
    * Major ticks are longer and brighter than minor ticks.
    * Full-extent gridlines are drawn for major ticks (very faint).
    *
+   * Colors are driven by CSS custom properties (--axis-line-major, --axis-line-minor,
+   * --axis-text, --axis-text-stroke, --grid-line) so the component automatically
+   * responds to the active data-theme on the document root.
+   *
    * pointer-events: none so all mouse events pass through to the canvas.
    */
 
@@ -64,7 +68,7 @@
       <line
         x1={px} y1={0}
         x2={px} y2={displayH}
-        stroke="rgba(255,255,255,0.06)"
+        stroke="var(--grid-line)"
         stroke-width="1"
       />
     {/each}
@@ -77,7 +81,7 @@
       <line
         x1={0} y1={py}
         x2={displayW} y2={py}
-        stroke="rgba(255,255,255,0.06)"
+        stroke="var(--grid-line)"
         stroke-width="1"
       />
     {/each}
@@ -87,11 +91,10 @@
   {#each xTicks as tick}
     {@const px = xToScreen(tick.value)}
     {@const len = tick.major ? MAJOR_TICK_LEN : MINOR_TICK_LEN}
-    {@const col = tick.major ? 'rgba(220,220,240,0.85)' : 'rgba(180,180,200,0.5)'}
     <line
       x1={px} y1={displayH - len}
       x2={px} y2={displayH}
-      stroke={col}
+      stroke={tick.major ? 'var(--axis-line-major)' : 'var(--axis-line-minor)'}
       stroke-width="1"
     />
     {#if tick.major}
@@ -100,9 +103,9 @@
         y={displayH - MAJOR_TICK_LEN - X_LABEL_GAP}
         text-anchor="middle"
         font-size={FONT_SIZE}
-        fill="rgba(200,200,220,0.9)"
+        fill="var(--axis-text)"
         font-family="monospace"
-        style="paint-order:stroke;stroke:rgba(10,10,18,0.7);stroke-width:3px;stroke-linejoin:round"
+        style="paint-order:stroke;stroke:var(--axis-text-stroke);stroke-width:3px;stroke-linejoin:round"
       >{tick.label}</text>
     {/if}
   {/each}
@@ -111,11 +114,10 @@
   {#each yTicks as tick}
     {@const py = yToScreen(tick.value)}
     {@const len = tick.major ? MAJOR_TICK_LEN : MINOR_TICK_LEN}
-    {@const col = tick.major ? 'rgba(220,220,240,0.85)' : 'rgba(180,180,200,0.5)'}
     <line
       x1={0} y1={py}
       x2={len} y2={py}
-      stroke={col}
+      stroke={tick.major ? 'var(--axis-line-major)' : 'var(--axis-line-minor)'}
       stroke-width="1"
     />
     {#if tick.major}
@@ -124,9 +126,9 @@
         y={py + FONT_SIZE / 2 - 1}
         text-anchor="start"
         font-size={FONT_SIZE}
-        fill="rgba(200,200,220,0.9)"
+        fill="var(--axis-text)"
         font-family="monospace"
-        style="paint-order:stroke;stroke:rgba(10,10,18,0.7);stroke-width:3px;stroke-linejoin:round"
+        style="paint-order:stroke;stroke:var(--axis-text-stroke);stroke-width:3px;stroke-linejoin:round"
       >{tick.label}</text>
     {/if}
   {/each}

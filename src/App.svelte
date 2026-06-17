@@ -28,14 +28,39 @@
   let prefs: Prefs = { ...DEFAULT_PREFS };
   let showRecent = false;
 
-  /** Persist current prefs to disk. Task 5.6 can also call this after changing theme. */
+  /** Per-theme WebGPU background color [r, g, b, a]. */
+  const THEME_BG: Record<string, [number, number, number, number]> = {
+    dark:  [0.10, 0.10, 0.12, 1.0],
+    light: [0.97, 0.97, 0.98, 1.0],
+  };
+
+  /** Apply the given theme to the document root and (if the renderer is ready)
+   *  update the WebGPU clear color and re-render. */
+  function applyTheme(theme: string, renderNow = false) {
+    document.documentElement.setAttribute('data-theme', theme);
+    const bg = THEME_BG[theme] ?? THEME_BG['dark'];
+    try {
+      renderer.setBackground(...bg);
+      if (renderNow) renderer.render();
+    } catch (_) {
+      // renderer may not be initialised yet on first call — that's fine
+    }
+  }
+
+  /** Persist current prefs to disk. */
   async function persistPrefs() {
     try {
       await savePrefs(JSON.stringify(prefs));
     } catch (e) {
-      // non-fatal, but warn so lost prefs are diagnosable
       console.warn('Failed to persist prefs:', e);
     }
+  }
+
+  /** Toggle between dark and light themes, persist, and re-render. */
+  async function toggleTheme() {
+    prefs = { ...prefs, theme: prefs.theme === 'dark' ? 'light' : 'dark' };
+    applyTheme(prefs.theme, true);
+    await persistPrefs();
   }
 
   /** Add path to recent files (dedupe, cap at 8), then persist. */
@@ -231,10 +256,14 @@
       // non-fatal: use defaults
     }
 
+    // Apply persisted theme to chrome immediately (renderer not ready yet).
+    document.documentElement.setAttribute('data-theme', prefs.theme);
+
     try {
       await renderer.init();
       await renderer.create(canvas);
-      renderer.render(); // blank dark frame
+      // Now set the WebGPU background for the persisted theme and render.
+      applyTheme(prefs.theme, true);
       refreshView();
     } catch (e) {
       error = String(e);
@@ -462,6 +491,15 @@
     >
       Copy
     </button>
+    <!-- Theme toggle -->
+    <button
+      class="theme-btn"
+      on:click={toggleTheme}
+      title={prefs.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      aria-label={prefs.theme === 'dark' ? 'Light mode' : 'Dark mode'}
+    >
+      {prefs.theme === 'dark' ? '☀' : '🌙'}
+    </button>
     {#if filePath && !fileMeta}
       <span class="file-label" title={filePath}>
         {filePath.split(/[\\/]/).pop()}
@@ -528,11 +566,132 @@
 </main>
 
 <style>
+  /* ── CSS custom properties — dark theme (default) ── */
+  :global(:root),
+  :global(:root[data-theme="dark"]) {
+    --bg: #1a1a1f;
+    --panel-bg: #16161e;
+    --panel-bg-alpha: rgba(20, 20, 30, 0.88);
+    --toolbar-bg: #111118;
+    --text: #e0e0ee;
+    --text-muted: #8888aa;
+    --text-dim: #b0b0cc;
+    --border: #2a2a3a;
+    --border-mid: #3a3a50;
+    --btn-bg: #2a2a3a;
+    --btn-border: #44445a;
+    --btn-hover-bg: #3a3a52;
+    --btn-hover-text: #e0e0ff;
+    --btn-active-bg: #1a4a60;
+    --btn-active-text: #00e5ff;
+    --btn-active-border: #00b8d9;
+    --accent: #3060c0;
+    --recent-bg: #1a1a28;
+    --recent-item-hover: #2a2a42;
+    --axis-line-major: rgba(220, 220, 240, 0.85);
+    --axis-line-minor: rgba(180, 180, 200, 0.5);
+    --axis-text: rgba(200, 200, 220, 0.9);
+    --axis-text-stroke: rgba(10, 10, 18, 0.7);
+    --grid-line: rgba(255, 255, 255, 0.06);
+    --cursor-dot-stroke: rgba(10, 10, 18, 0.7);
+    --cursor-readout-bg: rgba(10, 10, 20, 0.82);
+    --cursor-readout-border: rgba(180, 180, 220, 0.25);
+    --cursor-readout-text: #d0d0ee;
+    --cursor-readout-vals: #c0c0dd;
+    --cursor-divider: rgba(180, 180, 220, 0.2);
+    --cursor-delta-label: #aaaacc;
+    --cursor-delta-vals: #e0e0ff;
+    --series-row-hover: rgba(60, 60, 90, 0.4);
+    --series-ctrl-btn: #8888aa;
+    --series-ctrl-hover-bg: rgba(80, 80, 120, 0.5);
+    --series-name-text: #d0d0ee;
+    --swatch-border: rgba(255, 255, 255, 0.15);
+    --settings-header: #a0a0cc;
+    --settings-label: #a8a8c4;
+    --settings-val: #7878a0;
+    --dialog-bg: #1e1e28;
+    --dialog-overlay: rgba(0, 0, 0, 0.7);
+    --dialog-text: #e0e0ee;
+    --dialog-h2: #ffffff;
+    --dialog-subtitle: #7a7a9a;
+    --dialog-section-title: #8888aa;
+    --col-row-hover: #2a2a3a;
+    --col-row-selected: #252540;
+    --col-kind-numeric-bg: #1a3a1a;
+    --col-kind-numeric-text: #60dd60;
+    --col-kind-datetime-bg: #1a2a3a;
+    --col-kind-datetime-text: #60aadd;
+    --col-kind-text-bg: #3a2a1a;
+    --col-kind-text-text: #ddaa60;
+    --btn-cancel-bg: #2e2e44;
+    --btn-cancel-text: #aaaacc;
+  }
+
+  /* ── CSS custom properties — light theme ── */
+  :global(:root[data-theme="light"]) {
+    --bg: #f5f5f7;
+    --panel-bg: #ffffff;
+    --panel-bg-alpha: rgba(255, 255, 255, 0.92);
+    --toolbar-bg: #e8e8ed;
+    --text: #1a1a1f;
+    --text-muted: #666688;
+    --text-dim: #444455;
+    --border: #d0d0d8;
+    --border-mid: #b0b0bc;
+    --btn-bg: #e0e0e8;
+    --btn-border: #b8b8c8;
+    --btn-hover-bg: #d0d0dc;
+    --btn-hover-text: #111118;
+    --btn-active-bg: #cce4f0;
+    --btn-active-text: #006688;
+    --btn-active-border: #0088bb;
+    --accent: #3060c0;
+    --recent-bg: #f0f0f5;
+    --recent-item-hover: #e0e0ea;
+    --axis-line-major: rgba(40, 40, 60, 0.8);
+    --axis-line-minor: rgba(60, 60, 80, 0.4);
+    --axis-text: rgba(20, 20, 40, 0.9);
+    --axis-text-stroke: rgba(245, 245, 248, 0.85);
+    --grid-line: rgba(0, 0, 0, 0.07);
+    --cursor-dot-stroke: rgba(245, 245, 248, 0.85);
+    --cursor-readout-bg: rgba(255, 255, 255, 0.90);
+    --cursor-readout-border: rgba(80, 80, 100, 0.25);
+    --cursor-readout-text: #222230;
+    --cursor-readout-vals: #333344;
+    --cursor-divider: rgba(80, 80, 100, 0.2);
+    --cursor-delta-label: #555566;
+    --cursor-delta-vals: #111120;
+    --series-row-hover: rgba(160, 160, 200, 0.2);
+    --series-ctrl-btn: #555566;
+    --series-ctrl-hover-bg: rgba(100, 100, 160, 0.15);
+    --series-name-text: #222230;
+    --swatch-border: rgba(0, 0, 0, 0.15);
+    --settings-header: #444460;
+    --settings-label: #333348;
+    --settings-val: #666680;
+    --dialog-bg: #ffffff;
+    --dialog-overlay: rgba(0, 0, 0, 0.45);
+    --dialog-text: #1a1a2f;
+    --dialog-h2: #000010;
+    --dialog-subtitle: #555568;
+    --dialog-section-title: #666680;
+    --col-row-hover: #ebebf0;
+    --col-row-selected: #dde8f5;
+    --col-kind-numeric-bg: #d4f0d4;
+    --col-kind-numeric-text: #1a6a1a;
+    --col-kind-datetime-bg: #d4e4f0;
+    --col-kind-datetime-text: #1a4a7a;
+    --col-kind-text-bg: #f0e8d4;
+    --col-kind-text-text: #7a4a1a;
+    --btn-cancel-bg: #e0e0ea;
+    --btn-cancel-text: #444460;
+  }
+
   :global(body) {
     margin: 0;
-    background: #1a1a1f;
+    background: var(--bg);
     overflow: hidden;
-    color: #e0e0ee;
+    color: var(--text);
     font-family: sans-serif;
   }
 
@@ -548,8 +707,8 @@
     align-items: center;
     gap: 12px;
     padding: 8px 12px;
-    background: #111118;
-    border-bottom: 1px solid #2a2a3a;
+    background: var(--toolbar-bg);
+    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
     height: 42px;
     box-sizing: border-box;
@@ -557,7 +716,7 @@
 
   .open-btn {
     padding: 5px 16px;
-    background: #3060c0;
+    background: var(--accent);
     color: #fff;
     border: none;
     border-radius: 5px;
@@ -578,9 +737,9 @@
 
   .cursor-btn {
     padding: 5px 14px;
-    background: #2a2a3a;
-    color: #b0b0cc;
-    border: 1px solid #44445a;
+    background: var(--btn-bg);
+    color: var(--text-dim);
+    border: 1px solid var(--btn-border);
     border-radius: 5px;
     cursor: pointer;
     font-size: 0.85rem;
@@ -589,21 +748,21 @@
   }
 
   .cursor-btn:hover {
-    background: #3a3a52;
-    color: #e0e0ff;
+    background: var(--btn-hover-bg);
+    color: var(--btn-hover-text);
   }
 
   .cursor-btn.active {
-    background: #1a4a60;
-    color: #00e5ff;
-    border-color: #00b8d9;
+    background: var(--btn-active-bg);
+    color: var(--btn-active-text);
+    border-color: var(--btn-active-border);
   }
 
   .draw-mode-btn {
     padding: 5px 14px;
-    background: #2a2a3a;
-    color: #b0b0cc;
-    border: 1px solid #44445a;
+    background: var(--btn-bg);
+    color: var(--text-dim);
+    border: 1px solid var(--btn-border);
     border-radius: 5px;
     cursor: pointer;
     font-size: 0.85rem;
@@ -613,8 +772,8 @@
   }
 
   .draw-mode-btn:hover:not(:disabled) {
-    background: #3a3a52;
-    color: #e0e0ff;
+    background: var(--btn-hover-bg);
+    color: var(--btn-hover-text);
   }
 
   .draw-mode-btn:disabled {
@@ -622,9 +781,25 @@
     cursor: not-allowed;
   }
 
+  .theme-btn {
+    padding: 4px 10px;
+    background: var(--btn-bg);
+    border: 1px solid var(--btn-border);
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1.4;
+    transition: background 0.15s;
+    margin-left: auto;
+  }
+
+  .theme-btn:hover {
+    background: var(--btn-hover-bg);
+  }
+
   .file-label {
     font-size: 0.8rem;
-    color: #8888aa;
+    color: var(--text-muted);
     max-width: 400px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -648,13 +823,13 @@
     position: absolute;
     top: calc(100% + 4px);
     left: 0;
-    background: #1a1a28;
-    border: 1px solid #44445a;
+    background: var(--recent-bg);
+    border: 1px solid var(--btn-border);
     border-radius: 5px;
     min-width: 220px;
     max-width: 400px;
     z-index: 100;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
     overflow: hidden;
   }
 
@@ -663,9 +838,9 @@
     width: 100%;
     padding: 6px 12px;
     background: transparent;
-    color: #b0b0cc;
+    color: var(--text-dim);
     border: none;
-    border-bottom: 1px solid #2a2a3a;
+    border-bottom: 1px solid var(--border);
     text-align: left;
     cursor: pointer;
     font-size: 0.82rem;
@@ -680,8 +855,8 @@
   }
 
   .recent-item:hover {
-    background: #2a2a42;
-    color: #e0e0ff;
+    background: var(--recent-item-hover);
+    color: var(--btn-hover-text);
   }
 
   .canvas-wrap {

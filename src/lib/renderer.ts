@@ -217,6 +217,21 @@ export class Renderer {
   }
 
   /**
+   * Set the WebGPU clear colour to match the current theme.
+   *
+   * Call this when the theme changes (or on mount after loading prefs).
+   * Values are linear RGBA in [0, 1].
+   *  Dark:  (0.10, 0.10, 0.12, 1)
+   *  Light: (0.97, 0.97, 0.98, 1)
+   *
+   * Note: does NOT call render() — caller should call render() after if needed.
+   */
+  setBackground(r: number, g: number, b: number, a: number): void {
+    this.assertPlot();
+    (this.plot as any).set_background(r, g, b, a);
+  }
+
+  /**
    * Export all loaded series as a CSV string.
    *
    * The header row contains the X column name followed by each series' Y name.
