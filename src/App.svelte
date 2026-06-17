@@ -32,8 +32,9 @@
   async function persistPrefs() {
     try {
       await savePrefs(JSON.stringify(prefs));
-    } catch (_) {
-      // non-fatal: silently ignore
+    } catch (e) {
+      // non-fatal, but warn so lost prefs are diagnosable
+      console.warn('Failed to persist prefs:', e);
     }
   }
 
