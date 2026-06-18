@@ -403,23 +403,7 @@ mod wasm_impl {
                 // Compute global Y min/max from the FULL ys array for normalization.
                 // Ignore non-finite values. If all values are equal or ys is empty,
                 // set a safe range so normalization maps to ~0.5 without div-by-zero.
-                let (src_y_min, src_y_max) = {
-                    let mut mn = f64::INFINITY;
-                    let mut mx = f64::NEG_INFINITY;
-                    for &y in &ys {
-                        if y.is_finite() {
-                            mn = mn.min(y);
-                            mx = mx.max(y);
-                        }
-                    }
-                    if !mn.is_finite() || !mx.is_finite() || (mx - mn).abs() < 1e-15 {
-                        // Degenerate: use value ± 1 so the single point maps to 0.5.
-                        let center = if mn.is_finite() { mn } else { 0.0 };
-                        (center - 1.0, center + 1.0)
-                    } else {
-                        (mn, mx)
-                    }
-                };
+                let (src_y_min, src_y_max) = compute_y_bounds(&ys);
 
                 // Store FULL source data — no downsampling here.
                 // rebuild_visible() will LTTB-downsample to the visible range.
