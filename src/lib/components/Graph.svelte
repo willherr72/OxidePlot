@@ -81,15 +81,24 @@
   const CLICK_THRESHOLD_PX = 4;
 
   // ── View refresh ─────────────────────────────────────────────────────────────
-  function refreshView() {
+  /** Pull view state from the renderer without emitting any events.
+   *  Called by the exported `refresh()` (App-driven) to avoid the
+   *  App.syncFromGraph → refresh → dispatch('xrange') → handleXRange recursion. */
+  function pullViewState() {
     try {
       viewState = renderer.viewState();
       ticks = renderer.axisTicks();
-      if (viewState) {
-        dispatch('xrange', { x_min: viewState.x_min, x_max: viewState.x_max });
-      }
     } catch (_) {
       // renderer not ready yet
+    }
+  }
+
+  /** Pull view state then emit xrange — used only by genuine user-interaction
+   *  handlers (pan, wheel-zoom, fit, dblclick, resize) so Task-4 sync still works. */
+  function refreshView() {
+    pullViewState();
+    if (viewState) {
+      dispatch('xrange', { x_min: viewState.x_min, x_max: viewState.x_max });
     }
   }
 
@@ -360,10 +369,12 @@
   }
 
   // ── Exposed: read-only accessors for App's panels ─────────────────────────────
-  /** Re-pull all of this graph's panel-facing state from the renderer. */
+  /** Re-pull all of this graph's panel-facing state from the renderer.
+   *  Pure pull — does NOT emit xrange, so App.syncFromGraph() calling this
+   *  never triggers the handleXRange → syncFromGraph recursion. */
   export function refresh(): void {
     refreshSeriesInfo();
-    refreshView();
+    pullViewState();
   }
 
   export function getSeriesInfo(): SeriesInfoEntry[] { return seriesInfo; }

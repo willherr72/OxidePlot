@@ -158,8 +158,8 @@
   }
 
   function handleXRange(_event: CustomEvent<{ x_min: number; x_max: number }>) {
-    // Cross-graph X-sync arrives in Task 4. Mirror view state for the panels.
-    syncFromGraph();
+    // Task 4 will propagate this graph's X-range to other graphs when "Sync X" is on.
+    // For now, no-op — the graph already updated its own view; nothing for the workspace to do.
   }
 
   function handleDataChanged() {
