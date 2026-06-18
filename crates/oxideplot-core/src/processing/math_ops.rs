@@ -107,3 +107,115 @@ pub fn perform_math(
         total_possible,
     })
 }
+
+/// Centered simple moving average, window >= 1, clamped at the edges.
+pub fn moving_average(ys: &[f64], window: usize) -> Vec<f64> {
+    let n = ys.len();
+    let w = window.max(1);
+    let half = w / 2;
+    (0..n).map(|i| {
+        let lo = i.saturating_sub(half);
+        let hi = (i + half + 1).min(n);
+        let slice = &ys[lo..hi];
+        slice.iter().sum::<f64>() / slice.len() as f64
+    }).collect()
+}
+
+/// Numerical dy/dx: central difference interior, forward/backward at the ends.
+pub fn derivative(xs: &[f64], ys: &[f64]) -> Vec<f64> {
+    let n = ys.len().min(xs.len());
+    if n == 0 { return vec![]; }
+    if n == 1 { return vec![0.0]; }
+    (0..n).map(|i| {
+        if i == 0 {
+            (ys[1] - ys[0]) / (xs[1] - xs[0])
+        } else if i == n - 1 {
+            (ys[n - 1] - ys[n - 2]) / (xs[n - 1] - xs[n - 2])
+        } else {
+            (ys[i + 1] - ys[i - 1]) / (xs[i + 1] - xs[i - 1])
+        }
+    }).collect()
+}
+
+/// Cumulative trapezoidal integral; Y[0] = 0.
+pub fn integral(xs: &[f64], ys: &[f64]) -> Vec<f64> {
+    let n = ys.len().min(xs.len());
+    let mut out = Vec::with_capacity(n);
+    let mut acc = 0.0;
+    for i in 0..n {
+        if i > 0 {
+            acc += (xs[i] - xs[i - 1]) * (ys[i] + ys[i - 1]) / 2.0;
+        }
+        out.push(acc);
+    }
+    out
+}
+
+/// Normalize to [0,1] (min-max) or zero-mean/unit-std (z-score).
+pub fn normalize(ys: &[f64], zscore: bool) -> Vec<f64> {
+    let finite: Vec<f64> = ys.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() { return ys.to_vec(); }
+    if zscore {
+        let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+        let var = finite.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / finite.len() as f64;
+        let std = var.sqrt();
+        if std == 0.0 { return ys.iter().map(|_| 0.0).collect(); }
+        ys.iter().map(|&v| (v - mean) / std).collect()
+    } else {
+        let min = finite.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = finite.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let range = max - min;
+        if range == 0.0 { return ys.iter().map(|_| 0.5).collect(); }
+        ys.iter().map(|&v| (v - min) / range).collect()
+    }
+}
+
+pub fn map_abs(ys: &[f64]) -> Vec<f64> { ys.iter().map(|v| v.abs()).collect() }
+pub fn map_ln(ys: &[f64]) -> Vec<f64> { ys.iter().map(|v| v.ln()).collect() }
+pub fn map_sqrt(ys: &[f64]) -> Vec<f64> { ys.iter().map(|v| v.sqrt()).collect() }
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+
+    #[test]
+    fn moving_average_centered_window3() {
+        let ys = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        // centered window 3 (half=1), clamped at edges:
+        // i0:{1,2}=1.5  i1:{1,2,3}=2  i2:{2,3,4}=3  i3:{3,4,5}=4  i4:{4,5}=4.5
+        assert_eq!(moving_average(&ys, 3), vec![1.5, 2.0, 3.0, 4.0, 4.5]);
+    }
+    #[test]
+    fn moving_average_window1_is_identity() {
+        let ys = vec![1.0, 9.0, 4.0];
+        assert_eq!(moving_average(&ys, 1), ys);
+    }
+    #[test]
+    fn derivative_of_linear_is_constant_slope() {
+        let xs = vec![0.0, 1.0, 2.0, 3.0];
+        let ys = vec![0.0, 2.0, 4.0, 6.0]; // slope 2
+        for v in derivative(&xs, &ys) { assert!((v - 2.0).abs() < 1e-9, "got {v}"); }
+    }
+    #[test]
+    fn integral_of_constant_is_cumulative() {
+        let xs = vec![0.0, 1.0, 2.0, 3.0];
+        let ys = vec![1.0, 1.0, 1.0, 1.0];
+        assert_eq!(integral(&xs, &ys), vec![0.0, 1.0, 2.0, 3.0]);
+    }
+    #[test]
+    fn normalize_minmax_maps_to_unit() {
+        assert_eq!(normalize(&[10.0, 20.0, 30.0], false), vec![0.0, 0.5, 1.0]);
+    }
+    #[test]
+    fn normalize_zscore_has_zero_mean() {
+        let z = normalize(&[1.0, 2.0, 3.0], true);
+        let mean: f64 = z.iter().sum::<f64>() / z.len() as f64;
+        assert!(mean.abs() < 1e-9);
+    }
+    #[test]
+    fn unary_ops() {
+        assert_eq!(map_abs(&[-1.0, 2.0]), vec![1.0, 2.0]);
+        assert!(map_ln(&[-1.0])[0].is_nan());
+        assert_eq!(map_sqrt(&[4.0, 9.0]), vec![2.0, 3.0]);
+    }
+}
