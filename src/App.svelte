@@ -8,11 +8,25 @@
   import SeriesList from './lib/components/SeriesList.svelte';
   import Settings from './lib/components/Settings.svelte';
 
-  // ── Focused graph ────────────────────────────────────────────────────────────
-  // For this task the workspace renders exactly one graph; the toolbar/panels all
-  // target it. App holds a ref, calls its methods for actions, then re-pulls the
-  // graph's exposed state to feed the panels (one-directional data-flow).
-  let focusedGraph: Graph;
+  // ── Workspace: a vertical stack of graphs ────────────────────────────────────
+  // The workspace renders a `<Graph>` per entry in `graphs`, stacked vertically
+  // (equal heights). Exactly one graph is "focused" at a time; the toolbar/panels
+  // all target the focused graph. App holds a ref per graph (keyed by id), calls
+  // the focused graph's methods for actions, then re-pulls its exposed state to
+  // feed the panels (one-directional data-flow).
+  //
+  // IMPORTANT: graph identity is by `id` (a monotonic counter), NOT array index —
+  // graphs get removed, so indices are unstable.
+  let graphs: { id: number }[] = [{ id: 0 }];
+  let focusedId = 0;
+  let nextId = 1;
+
+  /** Component instances keyed by graph id, populated via `bind:this`. */
+  let graphRefs: Record<number, Graph> = {};
+
+  /** The focused graph's component instance (may be undefined momentarily right
+   *  after add/remove or before mount — callers/markup must guard). */
+  $: focusedGraph = graphRefs[focusedId] as Graph | undefined;
 
   // ── Panel-facing state (mirrored FROM the focused graph after each action) ─────
   let seriesInfo: SeriesInfoEntry[] = [];
@@ -28,22 +42,66 @@
   let pointRadius = 3.0;
   let normalized = false;
 
-  /** Pull all panel-facing state from the focused graph. */
+  /** Pull all panel-facing state from the focused graph.
+   *  Reads `graphRefs[focusedId]` directly (not the reactive `focusedGraph`
+   *  alias) so it always sees the just-assigned `focusedId` even when called
+   *  synchronously inside setFocus/removeGraph, before reactive statements run. */
   function syncFromGraph() {
-    if (!focusedGraph) return;
-    focusedGraph.refresh();
-    seriesInfo = focusedGraph.getSeriesInfo();
-    viewState = focusedGraph.getViewState();
-    hasData = focusedGraph.getHasData();
-    drawMode = focusedGraph.getDrawMode();
-    viewMode = focusedGraph.getViewMode();
-    cursorMode = focusedGraph.getCursorMode();
-    showGrid = focusedGraph.getShowGrid();
-    lineWidth = focusedGraph.getLineWidth();
-    pointRadius = focusedGraph.getPointRadius();
-    normalized = focusedGraph.getNormalized();
-    const err = focusedGraph.getError();
+    const g = graphRefs[focusedId];
+    if (!g) return;
+    g.refresh();
+    seriesInfo = g.getSeriesInfo();
+    viewState = g.getViewState();
+    hasData = g.getHasData();
+    drawMode = g.getDrawMode();
+    viewMode = g.getViewMode();
+    cursorMode = g.getCursorMode();
+    showGrid = g.getShowGrid();
+    lineWidth = g.getLineWidth();
+    pointRadius = g.getPointRadius();
+    normalized = g.getNormalized();
+    const err = g.getError();
     if (err) error = err;
+  }
+
+  // ── Workspace: add / remove / focus ──────────────────────────────────────────
+
+  /** Focus the graph with the given id and re-pull panel state from it so the
+   *  toolbar/panels reflect the newly-focused graph. */
+  function setFocus(id: number) {
+    if (focusedId === id) return;
+    focusedId = id;
+    // The newly-focused graph is already mounted; re-pull its exposed state.
+    syncFromGraph();
+  }
+
+  /** Append a new (empty) graph and focus it. */
+  function addGraph() {
+    const id = nextId++;
+    graphs = [...graphs, { id }];
+    focusedId = id;
+    // graphRefs[id] mounts on the next tick; syncFromGraph guards on undefined,
+    // and the new graph fires `ready` → handleGraphReady which syncs + themes it.
+  }
+
+  /** Remove the graph with the given id. Disabled when only one graph remains.
+   *  If the removed graph was focused, focus moves to a neighbor. */
+  function removeGraph(id: number) {
+    if (graphs.length <= 1) return;
+    const idx = graphs.findIndex(g => g.id === id);
+    if (idx === -1) return;
+
+    const wasFocused = id === focusedId;
+    graphs = graphs.filter(g => g.id !== id);
+    delete graphRefs[id]; // clean up the dangling ref
+    graphRefs = graphRefs; // nudge reactivity
+
+    if (wasFocused) {
+      // Move focus to a neighbor (prefer the previous one, else the new first).
+      const neighbor = graphs[Math.min(idx, graphs.length - 1)];
+      focusedId = neighbor.id;
+      syncFromGraph();
+    }
   }
 
   let fileMeta: FileMeta | null = null;
@@ -66,13 +124,15 @@
     light: [0.97, 0.97, 0.98, 1.0],
   };
 
-  /** Apply the given theme to the document root and (if the graph is ready)
-   *  update the WebGPU clear color and re-render. */
+  /** Apply the given theme to the document root and (if a graph is ready)
+   *  update the WebGPU clear color and re-render. Theme is workspace-global:
+   *  the background is pushed to EVERY graph in the stack. */
   function applyTheme(theme: string, renderNow = false) {
     document.documentElement.setAttribute('data-theme', theme);
     const bg = THEME_BG[theme] ?? THEME_BG['dark'];
-    // Theme applies to every graph's background (here, the one focused graph).
-    if (focusedGraph) focusedGraph.setBackground(bg[0], bg[1], bg[2], bg[3], renderNow);
+    for (const g of graphs) {
+      graphRefs[g.id]?.setBackground(bg[0], bg[1], bg[2], bg[3], renderNow);
+    }
   }
 
   /** Persist current prefs to disk. */
@@ -153,27 +213,30 @@
   }
 
   // ── Graph events ─────────────────────────────────────────────────────────────
-  function handleFocusRequest() {
-    // Single graph for now — already focused. (Multi-graph focus arrives later.)
-  }
-
   function handleXRange(_event: CustomEvent<{ x_min: number; x_max: number }>) {
     // Task 4 will propagate this graph's X-range to other graphs when "Sync X" is on.
     // For now, no-op — the graph already updated its own view; nothing for the workspace to do.
   }
 
   function handleDataChanged() {
+    // A graph's data changed; only the focused graph drives the panels.
     syncFromGraph();
   }
 
-  /** The focused graph's renderer is live — apply the persisted-theme background. */
-  function handleGraphReady() {
-    applyTheme(prefs.theme, true);
-    syncFromGraph();
+  /** A graph's renderer is live — push the persisted-theme background to it.
+   *  If it is the focused graph, also sync the panels from it. */
+  function handleGraphReady(id: number) {
+    const bg = THEME_BG[prefs.theme] ?? THEME_BG['dark'];
+    graphRefs[id]?.setBackground(bg[0], bg[1], bg[2], bg[3], true);
+    if (id === focusedId) syncFromGraph();
   }
 
-  /** A file dropped on the graph → run the open flow targeting that graph. */
-  function handleDropPath(event: CustomEvent<{ path: string }>) {
+  /** A file dropped on a graph → focus that graph, then run the open flow
+   *  targeting it. The drop targets THE GRAPH THAT EMITTED, not the focused one
+   *  (the Graph also emits `focusrequest` before `droppath`, but set focus here
+   *  too so openPath loads into the dropped-on graph). */
+  function handleDropPath(id: number, event: CustomEvent<{ path: string }>) {
+    setFocus(id);
     void openPath(event.detail.path);
   }
 
@@ -204,6 +267,8 @@
 
   /** Load a file at a known path (shared by dialog-pick, recent-click, drag-drop). */
   async function openPath(path: string) {
+    const g = focusedGraph;
+    if (!g) return;
     loading = true;
     error = null;
     try {
@@ -211,7 +276,7 @@
       const numArr = await readFile(path);
       const bytes = new Uint8Array(numArr);
       const filename = path.split(/[\\/]/).pop() ?? path;
-      fileMeta = focusedGraph.loadBytes(bytes, filename);
+      fileMeta = g.loadBytes(bytes, filename);
       await recordRecentFile(path);
     } catch (e) {
       error = `Failed to open file: ${e}`;
@@ -245,8 +310,10 @@
     const specs = event.detail;
     fileMeta = null; // close dialog
     error = null;
+    const g = focusedGraph;
+    if (!g) return;
     try {
-      focusedGraph.setSeries(specs);
+      g.setSeries(specs);
       syncFromGraph();
     } catch (e) {
       error = `Failed to render series: ${e}`;
@@ -260,7 +327,7 @@
   // ── Export ─────────────────────────────────────────────────────────────────
 
   async function handleExportCsv() {
-    if (!hasData) return;
+    if (!hasData || !focusedGraph) return;
     error = null;
     try {
       const csv = focusedGraph.exportCsv();
@@ -272,7 +339,7 @@
   }
 
   async function handleExportPng() {
-    if (!hasData) return;
+    if (!hasData || !focusedGraph) return;
     error = null;
     try {
       const blob = await focusedGraph.capturePng();
@@ -289,7 +356,7 @@
   }
 
   async function handleCopy() {
-    if (!hasData) return;
+    if (!hasData || !focusedGraph) return;
     error = null;
     try {
       const blob = await focusedGraph.capturePng();
@@ -341,6 +408,13 @@
         {/if}
       </div>
     {/if}
+    <button
+      class="cursor-btn"
+      on:click={addGraph}
+      title="Add a new graph below"
+    >
+      + Add Graph
+    </button>
     <button
       class="cursor-btn"
       disabled={!hasData}
@@ -431,23 +505,42 @@
     {/if}
   </div>
 
-  <!-- Workspace: the focused graph plus its overlay panels. The relative wrapper
-       gives the absolutely-positioned SeriesList/Settings panels (which target
-       the focused graph) a positioning context over the plot. -->
+  <!-- Workspace: a vertical stack of graphs plus the focused graph's overlay
+       panels. The relative wrapper gives the absolutely-positioned
+       SeriesList/Settings panels (which target the focused graph) a positioning
+       context over the plot area. Each graph is keyed by id (stable across
+       removals) and flexes to equal height. -->
   <div class="workspace">
-    <Graph
-      bind:this={focusedGraph}
-      focused={true}
-      on:ready={handleGraphReady}
-      on:focusrequest={handleFocusRequest}
-      on:xrange={handleXRange}
-      on:datachanged={handleDataChanged}
-      on:droppath={handleDropPath}
-    />
+    <div class="graph-stack">
+      {#each graphs as g (g.id)}
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="graph-slot">
+          <Graph
+            bind:this={graphRefs[g.id]}
+            focused={g.id === focusedId}
+            on:ready={() => handleGraphReady(g.id)}
+            on:focusrequest={() => setFocus(g.id)}
+            on:xrange={handleXRange}
+            on:datachanged={handleDataChanged}
+            on:droppath={(e) => handleDropPath(g.id, e)}
+          />
+          {#if graphs.length > 1}
+            <button
+              class="remove-graph-btn"
+              on:click|stopPropagation={() => removeGraph(g.id)}
+              title="Remove this graph"
+              aria-label="Remove graph"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          {/if}
+        </div>
+      {/each}
+    </div>
 
     <!-- Focused-graph panels (hidden in table mode, matching prior behavior). -->
-    {#if viewMode === 'plot'}
-      {#if seriesInfo.length > 0 && focusedGraph}
+    {#if viewMode === 'plot' && focusedGraph}
+      {#if seriesInfo.length > 0}
         <SeriesList
           series={seriesInfo}
           renderer={focusedGraph.renderer}
@@ -628,14 +721,58 @@
     box-sizing: border-box;
   }
 
-  /* Workspace holds the graph + its overlay panels; relative so the panels'
-     absolute positioning anchors to the plot area. */
+  /* Workspace holds the graph stack + its overlay panels; relative so the
+     panels' absolute positioning anchors to the plot area. */
   .workspace {
     position: relative;
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /* The vertical stack of graphs — fills the workspace; each slot flexes equally. */
+  .graph-stack {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* One graph + its remove control. flex:1 → equal heights across the stack.
+     position:relative anchors the remove button to this slot. The inner Graph
+     renders a flex column, so make this slot a flex column too. */
+  .graph-slot {
+    position: relative;
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .remove-graph-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 150;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: var(--panel-bg-alpha);
+    color: var(--text-muted);
+    border: 1px solid var(--btn-border);
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+
+  .remove-graph-btn:hover {
+    background: var(--btn-hover-bg);
+    color: #ff6666;
+    border-color: var(--border-mid);
   }
 
   .open-btn {
