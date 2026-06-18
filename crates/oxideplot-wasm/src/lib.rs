@@ -39,6 +39,7 @@ mod wasm_impl {
     use oxideplot_core::render::axis::{compute_grid_lines, format_tick_value};
     use oxideplot_core::data::datetime::format_timestamp;
     use oxideplot_core::processing::math_ops;
+    use oxideplot_core::processing::interpolation;
 
     /// Minimum target point count when width is very small.
     const MIN_TARGET_POINTS: usize = 800;
@@ -65,6 +66,8 @@ mod wasm_impl {
     struct TransformParams {
         window: Option<usize>,
         mode: Option<String>,
+        method: Option<String>,
+        points: Option<usize>,
     }
 
     /// The colour palette used by `ColumnDialog` on the JS side.
@@ -932,13 +935,13 @@ mod wasm_impl {
             let base = src.name.clone();
             let x_name = src.x_name.clone();
 
-            let (new_ys, label) = match kind.as_str() {
+            let (new_xs, new_ys, label) = match kind.as_str() {
                 "moving_average" => {
                     let w = p.window.unwrap_or(5).max(1);
-                    (math_ops::moving_average(&src.ys, w), format!("{base} · MA({w})"))
+                    (xs.clone(), math_ops::moving_average(&src.ys, w), format!("{base} · MA({w})"))
                 }
-                "derivative" => (math_ops::derivative(&src.xs, &src.ys), format!("d/dx({base})")),
-                "integral"   => (math_ops::integral(&src.xs, &src.ys), format!("∫({base})")),
+                "derivative" => (xs.clone(), math_ops::derivative(&src.xs, &src.ys), format!("d/dx({base})")),
+                "integral"   => (xs.clone(), math_ops::integral(&src.xs, &src.ys), format!("∫({base})")),
                 "normalize"  => {
                     let zscore = p.mode.as_deref() == Some("zscore");
                     let label = if zscore {
@@ -946,11 +949,22 @@ mod wasm_impl {
                     } else {
                         format!("norm({base})")
                     };
-                    (math_ops::normalize(&src.ys, zscore), label)
+                    (xs.clone(), math_ops::normalize(&src.ys, zscore), label)
                 }
-                "abs"  => (math_ops::map_abs(&src.ys),  format!("|{base}|")),
-                "log"  => (math_ops::map_ln(&src.ys),   format!("log({base})")),
-                "sqrt" => (math_ops::map_sqrt(&src.ys), format!("√({base})")),
+                "abs"  => (xs.clone(), math_ops::map_abs(&src.ys),  format!("|{base}|")),
+                "log"  => (xs.clone(), math_ops::map_ln(&src.ys),   format!("log({base})")),
+                "sqrt" => (xs.clone(), math_ops::map_sqrt(&src.ys), format!("√({base})")),
+                "resample" => {
+                    let method = match p.method.as_deref() {
+                        Some("nearest") => interpolation::Method::Nearest,
+                        Some("cubic")   => interpolation::Method::Cubic,
+                        _ => interpolation::Method::Linear,
+                    };
+                    let n = p.points.unwrap_or(500).max(2);
+                    let (grid_xs, grid_ys) = interpolation::resample(&src.xs, &src.ys, n, method);
+                    let mlabel = p.method.as_deref().unwrap_or("linear");
+                    (grid_xs, grid_ys, format!("{base} · resample({mlabel}, {n})"))
+                }
                 other  => return Err(JsValue::from_str(&format!("unknown transform: {other}"))),
             };
 
@@ -965,7 +979,7 @@ mod wasm_impl {
                 name: label,
                 x_name,
                 visible: true,
-                xs,
+                xs: new_xs,
                 ys: new_ys,
                 color,
                 draw_mode: DrawMode::Lines,
