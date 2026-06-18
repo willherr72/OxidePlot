@@ -50,6 +50,12 @@ near-term set. (Synced X-axis *requires* multi-graph, so they ship together.)
 
 ## Near-term phases
 
+> **Status (2026-06-18): all four near-term phases COMPLETE and visually confirmed.**
+> Phase 7 (Table view), Phase 8 (Math transforms), Phase 9 (Interpolation/resampling),
+> and Phase 10 (Multi-graph + synced X) are all built, reviewed, and working on the
+> `tauri-migration` branch. Each has its own design spec + plan under
+> `docs/superpowers/`. Remaining work is the long-term backlog (B1–B11) below.
+
 ### Phase 7 — Table view
 
 **Intent:** inspect the loaded data as a table alongside/over the plot.
@@ -178,8 +184,9 @@ that phase's specifics — e.g., exact transforms in Phase 8, the N-canvas-vs-
 N-viewport decision in Phase 10), produces its own design spec and
 implementation plan, and is built + reviewed before starting the next.
 
-**Immediate next step:** brainstorm **Phase 7 (Table view)** → its spec → plan →
-implementation.
+**Status:** Phases 7–10 are complete (see the status note above). The next step
+is to either finish/merge the `tauri-migration` branch or promote a backlog item
+(B1–B11) to its own brainstorm → spec → plan → implement cycle.
 
 ## Non-goals (for the roadmap as a whole)
 
