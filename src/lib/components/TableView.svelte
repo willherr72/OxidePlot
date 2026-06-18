@@ -43,6 +43,11 @@
   }
 
   function loadMeta() {
+    // Cancel any pending debounced timers before resetting state (Finding B)
+    if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+    for (let i = 0; i < filterTimers.length; i++) {
+      if (filterTimers[i] !== null) { clearTimeout(filterTimers[i]!); filterTimers[i] = null; }
+    }
     try {
       columns = renderer.tableColumns();
       rowCount = renderer.tableRowCount();
@@ -241,6 +246,7 @@
       {#each rows as row, ri}
         <div
           class="tr data-row"
+          class:even={(first + ri) % 2 === 0}
           style="position:absolute; top:{(first + ri) * ROW_H}px; left:0; right:0; height:{ROW_H}px;"
         >
           {#each row as cell, ci}
@@ -413,7 +419,7 @@
     min-width: max-content;
   }
 
-  .data-row:nth-child(even) {
+  .data-row.even {
     background: color-mix(in srgb, var(--panel-bg) 50%, var(--bg) 50%);
   }
 
