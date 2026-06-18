@@ -1002,6 +1002,11 @@ mod wasm_impl {
         /// each graph can still have its own independent Y axis.
         #[wasm_bindgen]
         pub fn set_x_range(&mut self, x_min: f64, x_max: f64) {
+            // Reject degenerate/inverted ranges: a zero-width or non-finite span
+            // would divide-by-zero in the coordinate mapping and grid lines.
+            if !x_min.is_finite() || !x_max.is_finite() || x_min >= x_max {
+                return;
+            }
             self.view.x_min = x_min;
             self.view.x_max = x_max;
             self.rebuild_visible();
