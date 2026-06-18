@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pickFile, readFile, saveFile, loadPrefs, savePrefs } from './lib/api.js';
   import { Renderer } from './lib/renderer.js';
@@ -7,6 +7,7 @@
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
   import SeriesList from './lib/components/SeriesList.svelte';
   import Settings from './lib/components/Settings.svelte';
+  import TableView from './lib/components/TableView.svelte';
   import Axes from './lib/overlay/Axes.svelte';
   import Cursors from './lib/overlay/Cursors.svelte';
   import type { CursorPoint } from './lib/overlay/Cursors.svelte';
@@ -127,6 +128,19 @@
     normalized = event.detail.value;
     try { renderer.setNormalized(normalized); } catch (_) {}
     refreshView();
+  }
+
+  // ── View mode (plot / table) ───────────────────────────────────────────────
+  let viewMode: 'plot' | 'table' = 'plot';
+  let tableView: TableView;
+
+  async function toggleViewMode() {
+    viewMode = viewMode === 'plot' ? 'table' : 'plot';
+    if (viewMode === 'table') {
+      // Wait for Svelte to mount TableView before calling refresh()
+      await tick();
+      if (tableView) tableView.refresh();
+    }
   }
 
   // ── Draw mode ──────────────────────────────────────────────────────────────
@@ -362,6 +376,10 @@
       drawMode = 'lines'; // reset to default on new data load
       refreshView();
       refreshSeriesInfo();
+      // If already in table mode, refresh the table with new data (tick ensures component is mounted)
+      if (viewMode === 'table') {
+        tick().then(() => { if (tableView) tableView.refresh(); });
+      }
     } catch (e) {
       error = `Failed to render series: ${e}`;
     }
@@ -488,6 +506,15 @@
     </button>
     <button
       class="cursor-btn"
+      class:active={viewMode === 'table'}
+      disabled={!hasData}
+      on:click={toggleViewMode}
+      title={viewMode === 'table' ? 'Switch to plot view' : 'Switch to table view'}
+    >
+      Table
+    </button>
+    <button
+      class="cursor-btn"
       class:active={showSettings}
       on:click={toggleSettings}
       title="Toggle settings panel"
@@ -543,8 +570,13 @@
     {/if}
   </div>
 
-  <!-- Plot canvas + axis overlay — fills the remaining space -->
-  <div class="canvas-wrap">
+  <!-- Table view — rendered alongside (not replacing) the canvas -->
+  {#if hasData && viewMode === 'table'}
+    <TableView bind:this={tableView} {renderer} />
+  {/if}
+
+  <!-- Plot canvas + axis overlay — fills the remaining space; hidden (not unmounted) in table mode -->
+  <div class="canvas-wrap" class:hidden={viewMode === 'table'}>
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <canvas
       bind:this={canvas}
@@ -905,6 +937,11 @@
     position: relative;
     flex: 1;
     overflow: hidden;
+  }
+
+  /* Hide the canvas wrap without unmounting it (preserves the wgpu surface). */
+  .canvas-wrap.hidden {
+    display: none;
   }
 
   canvas {
