@@ -838,7 +838,6 @@ pub use wasm_impl::OxidePlot;
 // do-nothing stub keeps the `[lib] crate-type = ["cdylib", "rlib"]` happy.
 
 #[cfg(not(target_arch = "wasm32"))]
-#[wasm_bindgen]
 pub fn oxideplot_native_stub() -> &'static str {
     "NATIVE_STUB"
 }
