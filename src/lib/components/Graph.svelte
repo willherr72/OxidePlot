@@ -377,6 +377,28 @@
     pullViewState();
   }
 
+  /**
+   * Apply an externally-supplied X-range to this graph without emitting an
+   * `xrange` event (loop-safe).
+   *
+   * Calls `renderer.setXRange` (which runs LTTB + render on the wasm side),
+   * then `pullViewState()` (the non-emitting state pull) so this graph's
+   * viewState/ticks/axes overlay update to reflect the new range.
+   *
+   * Safety guarantee: `pullViewState` NEVER dispatches `xrange`, so calling
+   * `applyXRange` on graph B from graph A's `xrange` handler does NOT cause
+   * graph B to re-emit, preventing infinite propagation.
+   */
+  export function applyXRange(xMin: number, xMax: number): void {
+    try {
+      renderer.setXRange(xMin, xMax);
+    } catch (_) {
+      // renderer not ready yet — no-op
+      return;
+    }
+    pullViewState();
+  }
+
   export function getSeriesInfo(): SeriesInfoEntry[] { return seriesInfo; }
   export function getViewState(): ViewState | null { return viewState; }
   export function getDrawMode(): DrawMode { return drawMode; }

@@ -992,6 +992,22 @@ mod wasm_impl {
             Ok(())
         }
 
+        // ── X-range sync (Task 4) ─────────────────────────────────────────────
+
+        /// Set the view's X bounds without touching Y, then rebuild visible
+        /// series (LTTB re-runs for the new range) and re-render.
+        ///
+        /// Called by the TypeScript `applyXRange` path when the workspace is
+        /// propagating one graph's X-range to another.  Y stays untouched so
+        /// each graph can still have its own independent Y axis.
+        #[wasm_bindgen]
+        pub fn set_x_range(&mut self, x_min: f64, x_max: f64) {
+            self.view.x_min = x_min;
+            self.view.x_max = x_max;
+            self.rebuild_visible();
+            self.render();
+        }
+
         // ── Private helpers ───────────────────────────────────────────────────
 
         /// Rebuild `self.series` by LTTB-downsampling each source series to the

@@ -222,10 +222,35 @@
     syncFromGraph();
   }
 
+  // ── Sync X (Task 4) ──────────────────────────────────────────────────────────
+  /** When true, panning/zooming any graph also sets the same X-range on all others. */
+  let syncX = false;
+
+  function toggleSyncX() {
+    syncX = !syncX;
+    // When turning ON, immediately align all other graphs to the focused graph's
+    // current X-range so they snap into sync without requiring the user to pan first.
+    if (syncX) {
+      const focused = graphRefs[focusedId];
+      if (!focused) return;
+      const vs = focused.getViewState();
+      if (!vs) return;
+      for (const g of graphs) {
+        if (g.id !== focusedId) {
+          graphRefs[g.id]?.applyXRange(vs.x_min, vs.x_max);
+        }
+      }
+    }
+  }
+
   // ── Graph events ─────────────────────────────────────────────────────────────
-  function handleXRange(_event: CustomEvent<{ x_min: number; x_max: number }>) {
-    // Task 4 will propagate this graph's X-range to other graphs when "Sync X" is on.
-    // For now, no-op — the graph already updated its own view; nothing for the workspace to do.
+  function handleXRange(emittingId: number, detail: { x_min: number; x_max: number }) {
+    // Only propagate when Sync X is on; never call back to the emitting graph.
+    if (!syncX) return;
+    for (const g of graphs) {
+      if (g.id === emittingId) continue;
+      graphRefs[g.id]?.applyXRange(detail.x_min, detail.x_max);
+    }
   }
 
   function handleDataChanged(id: number) {
@@ -464,6 +489,15 @@
     </button>
     <button
       class="cursor-btn"
+      class:active={syncX}
+      on:click={toggleSyncX}
+      title={syncX ? 'Sync X ON — all graphs share the same X-range (click to disable)' : 'Sync X OFF — pan/zoom one graph to sync all others'}
+    >
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+      Sync X
+    </button>
+    <button
+      class="cursor-btn"
       class:active={cursorMode}
       on:click={toggleCursorMode}
       title={cursorMode ? 'Cursor mode ON — click to place cursors (toggle off to clear)' : 'Cursor mode OFF'}
@@ -559,7 +593,7 @@
             focused={g.id === focusedId}
             on:ready={() => handleGraphReady(g.id)}
             on:focusrequest={() => setFocus(g.id)}
-            on:xrange={handleXRange}
+            on:xrange={(e) => handleXRange(g.id, e.detail)}
             on:datachanged={() => handleDataChanged(g.id)}
             on:droppath={(e) => handleDropPath(g.id, e)}
           />

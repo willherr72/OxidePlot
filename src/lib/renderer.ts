@@ -284,6 +284,15 @@ export class Renderer {
     (this.plot as any).add_transform(sourceIndex, kind, params);
   }
 
+  /**
+   * Set the view's X bounds (leaving Y unchanged), rebuild visible series,
+   * and re-render.  Called by Graph.applyXRange when syncing X across graphs.
+   */
+  setXRange(xMin: number, xMax: number): void {
+    this.assertPlot();
+    (this.plot as any).set_x_range(xMin, xMax);
+  }
+
   // ── Table API ─────────────────────────────────────────────────────────────
 
   /** Return column metadata `[{ name, numeric }]` for the loaded file. */
