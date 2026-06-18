@@ -380,6 +380,13 @@ mod wasm_impl {
                 }
             }
 
+            // Normalized mode: Y is always unitless [−0.05, 1.05], independent of
+            // the data and of X validity — set it before the X early-return.
+            if self.normalized {
+                self.view.y_min = -0.05;
+                self.view.y_max = 1.05;
+            }
+
             if !x_min.is_finite() || !x_max.is_finite() {
                 return;
             }
@@ -388,11 +395,7 @@ mod wasm_impl {
             self.view.x_min = x_min - x_pad;
             self.view.x_max = x_max + x_pad;
 
-            if self.normalized {
-                // Normalized mode: Y axis is always unitless [−0.05, 1.05].
-                self.view.y_min = -0.05;
-                self.view.y_max = 1.05;
-            } else {
+            if !self.normalized {
                 // Normal mode: fit Y from raw data values.
                 let mut y_min = f64::INFINITY;
                 let mut y_max = f64::NEG_INFINITY;
