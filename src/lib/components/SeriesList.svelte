@@ -49,6 +49,8 @@
   let fxKind: string = 'moving_average';
   let fxWindow: number = 5;
   let fxMode: string = 'minmax';
+  let fxMethod: string = 'linear';
+  let fxPoints: number = 500;
 
   /** Toggle the fx picker for row i; clicking the open row closes it. */
   function toggleFx(i: number) {
@@ -60,16 +62,20 @@
       fxKind = 'moving_average';
       fxWindow = 5;
       fxMode = 'minmax';
+      fxMethod = 'linear';
+      fxPoints = 500;
     }
   }
 
   /** Apply the current picker selection as a transform on series i. */
   function applyFx(i: number) {
-    let params: { window?: number; mode?: string } | null = null;
+    let params: { window?: number; mode?: string; method?: string; points?: number } | null = null;
     if (fxKind === 'moving_average') {
       params = { window: fxWindow };
     } else if (fxKind === 'normalize') {
       params = { mode: fxMode };
+    } else if (fxKind === 'resample') {
+      params = { method: fxMethod, points: fxPoints };
     }
     try {
       renderer.addTransform(i, fxKind, params);
@@ -133,6 +139,7 @@
                 <option value="derivative">Derivative</option>
                 <option value="integral">Integral</option>
                 <option value="normalize">Normalize</option>
+                <option value="resample">Resample</option>
                 <option value="abs">Abs</option>
                 <option value="log">Log</option>
                 <option value="sqrt">Sqrt</option>
@@ -157,6 +164,25 @@
                   <option value="minmax">Min-max</option>
                   <option value="zscore">Z-score</option>
                 </select>
+              </label>
+            {:else if fxKind === 'resample'}
+              <label class="fx-label">
+                Method
+                <select class="fx-select" bind:value={fxMethod}>
+                  <option value="linear">Linear</option>
+                  <option value="nearest">Nearest</option>
+                  <option value="cubic">Cubic spline</option>
+                </select>
+              </label>
+              <label class="fx-label">
+                Points
+                <input
+                  class="fx-input"
+                  type="number"
+                  bind:value={fxPoints}
+                  min="2"
+                  step="1"
+                />
               </label>
             {/if}
 
