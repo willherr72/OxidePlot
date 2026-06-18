@@ -6,11 +6,13 @@
    *   - Line width (range slider + number, 0.5–6)
    *   - Point radius (range slider + number, 1–10)
    *   - Grid on/off (checkbox)
+   *   - Normalize multi-unit (checkbox)
    *
    * Emits:
    *   - linewidth: { value: number }
    *   - pointradius: { value: number }
    *   - showgrid: { value: boolean }
+   *   - normalized: { value: boolean }
    *
    * Colors use CSS custom properties so the panel responds to data-theme.
    */
@@ -19,11 +21,13 @@
   export let lineWidth: number = 2.0;
   export let pointRadius: number = 3.0;
   export let showGrid: boolean = true;
+  export let normalized: boolean = false;
 
   const dispatch = createEventDispatcher<{
     linewidth: { value: number };
     pointradius: { value: number };
     showgrid: { value: boolean };
+    normalized: { value: boolean };
   }>();
 
   function onLineWidthChange() {
@@ -36,6 +40,10 @@
 
   function onShowGridChange() {
     dispatch('showgrid', { value: showGrid });
+  }
+
+  function onNormalizedChange() {
+    dispatch('normalized', { value: normalized });
   }
 </script>
 
@@ -81,6 +89,16 @@
       type="checkbox"
       bind:checked={showGrid}
       on:change={onShowGridChange}
+    />
+  </div>
+
+  <div class="setting-row checkbox-row">
+    <label for="normalize">Normalize (multi-unit)</label>
+    <input
+      id="normalize"
+      type="checkbox"
+      bind:checked={normalized}
+      on:change={onNormalizedChange}
     />
   </div>
 </div>

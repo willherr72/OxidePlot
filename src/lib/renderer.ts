@@ -245,6 +245,21 @@ export class Renderer {
     return (this.plot as any).export_csv() as string;
   }
 
+  /**
+   * Enable or disable normalized multi-unit overlay mode.
+   *
+   * When on, each series' Y is mapped to [0, 1] using its own global min/max
+   * so series with different units/scales overlay comparably on a unitless Y
+   * axis.  When off, raw Y values and real axis units are restored.
+   *
+   * Internally calls `set_normalized` on the WASM side, which triggers
+   * `auto_fit()` and `render()` automatically.
+   */
+  setNormalized(on: boolean): void {
+    this.assertPlot();
+    (this.plot as any).set_normalized(on);
+  }
+
   private assertPlot(): void {
     if (!this.plot) throw new Error('Renderer not created — call create(canvas) first');
   }

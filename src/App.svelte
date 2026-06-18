@@ -99,6 +99,7 @@
   let showGrid = true;
   let lineWidth = 2.0;
   let pointRadius = 3.0;
+  let normalized = false;
 
   function toggleSettings() {
     showSettings = !showSettings;
@@ -118,6 +119,12 @@
 
   function handleShowGrid(event: CustomEvent<{ value: boolean }>) {
     showGrid = event.detail.value;
+  }
+
+  function handleNormalized(event: CustomEvent<{ value: boolean }>) {
+    normalized = event.detail.value;
+    try { renderer.setNormalized(normalized); } catch (_) {}
+    refreshView();
   }
 
   // ── Draw mode ──────────────────────────────────────────────────────────────
@@ -554,9 +561,11 @@
         {lineWidth}
         {pointRadius}
         {showGrid}
+        {normalized}
         on:linewidth={handleLineWidth}
         on:pointradius={handlePointRadius}
         on:showgrid={handleShowGrid}
+        on:normalized={handleNormalized}
       />
     {/if}
   </div>

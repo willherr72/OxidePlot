@@ -51,6 +51,10 @@ mod wasm_impl {
         ys: Vec<f64>,
         color: [f32; 4],
         draw_mode: DrawMode,
+        /// Global Y min/max over the FULL ys array, computed once in set_series.
+        /// Used for per-source normalization in rebuild_visible when normalized mode is on.
+        y_min: f64,
+        y_max: f64,
     }
 
     /// Serialisable info about one series, returned by `series_info`.
@@ -150,6 +154,9 @@ mod wasm_impl {
         point_radius: f32,
         /// Background clear color [r, g, b, a]. Default: dark (#1a1a1f).
         bg_color: [f64; 4],
+        /// When true, each series' Y is rescaled to [0, 1] (per-source global range)
+        /// before building GPU points, and the Y view is set to [-0.05, 1.05].
+        normalized: bool,
     }
 
     #[wasm_bindgen]
@@ -205,6 +212,7 @@ mod wasm_impl {
                 line_width: 2.0,
                 point_radius: 3.0,
                 bg_color: [0.10_f64, 0.10, 0.12, 1.0],
+                normalized: false,
             }
         }
 
@@ -303,6 +311,27 @@ mod wasm_impl {
                     _ => DrawMode::Lines,
                 };
 
+                // Compute global Y min/max from the FULL ys array for normalization.
+                // Ignore non-finite values. If all values are equal or ys is empty,
+                // set a safe range so normalization maps to ~0.5 without div-by-zero.
+                let (src_y_min, src_y_max) = {
+                    let mut mn = f64::INFINITY;
+                    let mut mx = f64::NEG_INFINITY;
+                    for &y in &ys {
+                        if y.is_finite() {
+                            mn = mn.min(y);
+                            mx = mx.max(y);
+                        }
+                    }
+                    if !mn.is_finite() || !mx.is_finite() || (mx - mn).abs() < 1e-15 {
+                        // Degenerate: use value ± 1 so the single point maps to 0.5.
+                        let center = if mn.is_finite() { mn } else { 0.0 };
+                        (center - 1.0, center + 1.0)
+                    } else {
+                        (mn, mx)
+                    }
+                };
+
                 // Store FULL source data — no downsampling here.
                 // rebuild_visible() will LTTB-downsample to the visible range.
                 let name = data.columns[spec.y_col].clone();
@@ -315,6 +344,8 @@ mod wasm_impl {
                     ys,
                     color: spec.color,
                     draw_mode,
+                    y_min: src_y_min,
+                    y_max: src_y_max,
                 });
             }
 
@@ -327,41 +358,63 @@ mod wasm_impl {
 
         /// Auto-fit the view bounds to encompass all stored series with 5% padding,
         /// then rebuild visible downsampled series and re-render.
+        ///
+        /// When `self.normalized` is ON the Y view is always [-0.05, 1.05]; only
+        /// the X range is fitted from the data.  When OFF, both axes are fitted.
         #[wasm_bindgen]
         pub fn auto_fit(&mut self) {
             if self.sources.is_empty() {
                 return;
             }
 
+            // Always compute X extent from data.
             let mut x_min = f64::INFINITY;
             let mut x_max = f64::NEG_INFINITY;
-            let mut y_min = f64::INFINITY;
-            let mut y_max = f64::NEG_INFINITY;
 
             for s in &self.sources {
-                for (&x, &y) in s.xs.iter().zip(s.ys.iter()) {
+                for &x in s.xs.iter() {
                     if x.is_finite() {
                         x_min = x_min.min(x);
                         x_max = x_max.max(x);
                     }
-                    if y.is_finite() {
-                        y_min = y_min.min(y);
-                        y_max = y_max.max(y);
-                    }
                 }
             }
 
-            if !x_min.is_finite() || !x_max.is_finite() || !y_min.is_finite() || !y_max.is_finite() {
+            if !x_min.is_finite() || !x_max.is_finite() {
                 return;
             }
 
             let x_pad = ((x_max - x_min) * 0.05).max(1e-9);
-            let y_pad = ((y_max - y_min) * 0.05).max(1e-9);
-
             self.view.x_min = x_min - x_pad;
             self.view.x_max = x_max + x_pad;
-            self.view.y_min = y_min - y_pad;
-            self.view.y_max = y_max + y_pad;
+
+            if self.normalized {
+                // Normalized mode: Y axis is always unitless [−0.05, 1.05].
+                self.view.y_min = -0.05;
+                self.view.y_max = 1.05;
+            } else {
+                // Normal mode: fit Y from raw data values.
+                let mut y_min = f64::INFINITY;
+                let mut y_max = f64::NEG_INFINITY;
+
+                for s in &self.sources {
+                    for &y in s.ys.iter() {
+                        if y.is_finite() {
+                            y_min = y_min.min(y);
+                            y_max = y_max.max(y);
+                        }
+                    }
+                }
+
+                if !y_min.is_finite() || !y_max.is_finite() {
+                    return;
+                }
+
+                let y_pad = ((y_max - y_min) * 0.05).max(1e-9);
+                self.view.y_min = y_min - y_pad;
+                self.view.y_max = y_max + y_pad;
+            }
+
             self.view.auto_fit = false;
             self.view.initialized = true;
 
@@ -604,6 +657,26 @@ mod wasm_impl {
             self.render();
         }
 
+        /// Enable or disable normalized multi-unit overlay mode.
+        ///
+        /// When ON, each series' Y values are mapped to [0, 1] using that
+        /// series' own global min/max (computed once in `set_series`), so
+        /// series with very different units/scales overlay comparably.  The Y
+        /// view is set to [-0.05, 1.05] (unitless).
+        ///
+        /// When OFF (default), raw Y values are used and the Y axis shows real
+        /// engineering units.  Turning off calls `auto_fit()` to restore the
+        /// original Y range.
+        ///
+        /// The raw `ys` data in each `SourceSeries` is NEVER mutated; the
+        /// normalization is applied only when building GPU points in
+        /// `rebuild_visible`.  CSV export always returns the original values.
+        #[wasm_bindgen]
+        pub fn set_normalized(&mut self, on: bool) {
+            self.normalized = on;
+            self.auto_fit();
+        }
+
         // ── Export ────────────────────────────────────────────────────────────
 
         /// Export all source series as a CSV string.
@@ -704,11 +777,29 @@ mod wasm_impl {
                     let (vis_x, vis_y) =
                         downsample_for_view(&src.xs, &src.ys, x_min, x_max, target);
 
-                    let points: Vec<[f32; 2]> = vis_x
-                        .iter()
-                        .zip(vis_y.iter())
-                        .map(|(&x, &y)| [x as f32, y as f32])
-                        .collect();
+                    let points: Vec<[f32; 2]> = if self.normalized {
+                        // Normalize Y using this source's global min/max.
+                        // Guard: if y_max == y_min (degenerate), map to 0.5.
+                        let range = src.y_max - src.y_min;
+                        vis_x
+                            .iter()
+                            .zip(vis_y.iter())
+                            .map(|(&x, &y)| {
+                                let yn = if range.abs() < 1e-15 {
+                                    0.5
+                                } else {
+                                    (y - src.y_min) / range
+                                };
+                                [x as f32, yn as f32]
+                            })
+                            .collect()
+                    } else {
+                        vis_x
+                            .iter()
+                            .zip(vis_y.iter())
+                            .map(|(&x, &y)| [x as f32, y as f32])
+                            .collect()
+                    };
 
                     SeriesGpuData {
                         points,
