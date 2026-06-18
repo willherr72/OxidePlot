@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pickFile, readFile, saveFile, loadPrefs, savePrefs } from './lib/api.js';
   import { Renderer } from './lib/renderer.js';
   import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from './lib/renderer.js';
@@ -18,6 +19,7 @@
   let error: string | null = null;
   let loading = false;
   let viewState: ViewState | null = null;
+  let dragHover = false;
 
   // ── Prefs ──────────────────────────────────────────────────────────────────
   interface Prefs {
@@ -290,7 +292,25 @@
       }
     });
     ro.observe(canvas);
-    return () => ro.disconnect();
+
+    // Register Tauri drag-drop listener (OS drops give file paths; HTML5 ondrop does not).
+    const unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type === 'over') {
+        dragHover = true;
+      } else if (p.type === 'leave') {
+        dragHover = false;
+      } else if (p.type === 'drop') {
+        dragHover = false;
+        const path = (p as { type: string; paths?: string[] }).paths?.[0];
+        if (path) { void openPath(path); }
+      }
+    });
+
+    return () => {
+      ro.disconnect();
+      unlistenDrop();
+    };
   });
 
   /** Load a file at a known path (shared by dialog-pick and recent-click). */
@@ -567,6 +587,11 @@
         on:showgrid={handleShowGrid}
         on:normalized={handleNormalized}
       />
+    {/if}
+    {#if dragHover}
+      <div class="drop-overlay" aria-hidden="true">
+        <span class="drop-label">Drop a CSV / Excel file to open</span>
+      </div>
     {/if}
   </div>
 
@@ -891,5 +916,30 @@
 
   canvas:active {
     cursor: grabbing;
+  }
+
+  /* ── Drag-drop hover overlay ── */
+  .drop-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--btn-active-border);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--btn-active-bg) 18%, transparent);
+    z-index: 200;
+  }
+
+  .drop-label {
+    padding: 10px 24px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--btn-active-text);
+    background: var(--panel-bg-alpha);
+    border: 1px solid var(--btn-active-border);
+    border-radius: 8px;
+    letter-spacing: 0.02em;
   }
 </style>
