@@ -218,9 +218,9 @@
     // For now, no-op — the graph already updated its own view; nothing for the workspace to do.
   }
 
-  function handleDataChanged() {
+  function handleDataChanged(id: number) {
     // A graph's data changed; only the focused graph drives the panels.
-    syncFromGraph();
+    if (id === focusedId) syncFromGraph();
   }
 
   /** A graph's renderer is live — push the persisted-theme background to it.
@@ -413,7 +413,8 @@
       on:click={addGraph}
       title="Add a new graph below"
     >
-      + Add Graph
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Add Graph
     </button>
     <button
       class="cursor-btn"
@@ -521,7 +522,7 @@
             on:ready={() => handleGraphReady(g.id)}
             on:focusrequest={() => setFocus(g.id)}
             on:xrange={handleXRange}
-            on:datachanged={handleDataChanged}
+            on:datachanged={() => handleDataChanged(g.id)}
             on:droppath={(e) => handleDropPath(g.id, e)}
           />
           {#if graphs.length > 1}
@@ -797,6 +798,9 @@
   }
 
   .cursor-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     padding: 5px 14px;
     background: var(--btn-bg);
     color: var(--text-dim);
