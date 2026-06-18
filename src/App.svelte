@@ -1,26 +1,55 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
-  import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { onMount } from 'svelte';
   import { pickFile, readFile, saveFile, loadPrefs, savePrefs } from './lib/api.js';
-  import { Renderer } from './lib/renderer.js';
-  import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from './lib/renderer.js';
+  import type { SeriesSpec, ViewState, SeriesInfoEntry } from './lib/renderer.js';
+  import type { FileMeta } from './lib/renderer.js';
+  import Graph from './lib/components/Graph.svelte';
   import ColumnDialog from './lib/components/ColumnDialog.svelte';
   import SeriesList from './lib/components/SeriesList.svelte';
   import Settings from './lib/components/Settings.svelte';
-  import TableView from './lib/components/TableView.svelte';
-  import Axes from './lib/overlay/Axes.svelte';
-  import Cursors from './lib/overlay/Cursors.svelte';
-  import type { CursorPoint } from './lib/overlay/Cursors.svelte';
 
-  let canvas: HTMLCanvasElement;
-  const renderer = new Renderer();
+  // ── Focused graph ────────────────────────────────────────────────────────────
+  // For this task the workspace renders exactly one graph; the toolbar/panels all
+  // target it. App holds a ref, calls its methods for actions, then re-pulls the
+  // graph's exposed state to feed the panels (one-directional data-flow).
+  let focusedGraph: Graph;
+
+  // ── Panel-facing state (mirrored FROM the focused graph after each action) ─────
+  let seriesInfo: SeriesInfoEntry[] = [];
+  let viewState: ViewState | null = null;
+  let hasData = false;
+  let drawMode: 'lines' | 'step' | 'points' = 'lines';
+  let viewMode: 'plot' | 'table' = 'plot';
+  let cursorMode = false;
+  // Appearance (mirrors of the focused graph's settings; seeded with the
+  // graph's defaults so the Settings panel shows correct initial values).
+  let showGrid = true;
+  let lineWidth = 2.0;
+  let pointRadius = 3.0;
+  let normalized = false;
+
+  /** Pull all panel-facing state from the focused graph. */
+  function syncFromGraph() {
+    if (!focusedGraph) return;
+    focusedGraph.refresh();
+    seriesInfo = focusedGraph.getSeriesInfo();
+    viewState = focusedGraph.getViewState();
+    hasData = focusedGraph.getHasData();
+    drawMode = focusedGraph.getDrawMode();
+    viewMode = focusedGraph.getViewMode();
+    cursorMode = focusedGraph.getCursorMode();
+    showGrid = focusedGraph.getShowGrid();
+    lineWidth = focusedGraph.getLineWidth();
+    pointRadius = focusedGraph.getPointRadius();
+    normalized = focusedGraph.getNormalized();
+    const err = focusedGraph.getError();
+    if (err) error = err;
+  }
 
   let fileMeta: FileMeta | null = null;
   let filePath: string | null = null;
   let error: string | null = null;
   let loading = false;
-  let viewState: ViewState | null = null;
-  let dragHover = false;
 
   // ── Prefs ──────────────────────────────────────────────────────────────────
   interface Prefs {
@@ -37,17 +66,13 @@
     light: [0.97, 0.97, 0.98, 1.0],
   };
 
-  /** Apply the given theme to the document root and (if the renderer is ready)
+  /** Apply the given theme to the document root and (if the graph is ready)
    *  update the WebGPU clear color and re-render. */
   function applyTheme(theme: string, renderNow = false) {
     document.documentElement.setAttribute('data-theme', theme);
     const bg = THEME_BG[theme] ?? THEME_BG['dark'];
-    try {
-      renderer.setBackground(...bg);
-      if (renderNow) renderer.render();
-    } catch (_) {
-      // renderer may not be initialised yet on first call — that's fine
-    }
+    // Theme applies to every graph's background (here, the one focused graph).
+    if (focusedGraph) focusedGraph.setBackground(bg[0], bg[1], bg[2], bg[3], renderNow);
   }
 
   /** Persist current prefs to disk. */
@@ -72,200 +97,89 @@
     prefs = { ...prefs, recentFiles: [path, ...filtered].slice(0, 8) };
     await persistPrefs();
   }
-  let ticks: AxisTicksData | null = null;
-  let seriesInfo: SeriesInfoEntry[] = [];
-
-  function refreshView() {
-    try {
-      viewState = renderer.viewState();
-      ticks = renderer.axisTicks();
-    } catch (_) {
-      // renderer not ready yet
-    }
-  }
-
-  function refreshSeriesInfo() {
-    try {
-      seriesInfo = renderer.seriesInfo();
-    } catch (_) {
-      seriesInfo = [];
-    }
-  }
-
-  function handleSeriesChange() {
-    refreshSeriesInfo();
-    refreshView();
-  }
 
   // ── Settings panel ─────────────────────────────────────────────────────────
   let showSettings = false;
-  let showGrid = true;
-  let lineWidth = 2.0;
-  let pointRadius = 3.0;
-  let normalized = false;
 
   function toggleSettings() {
     showSettings = !showSettings;
   }
 
   function handleLineWidth(event: CustomEvent<{ value: number }>) {
-    lineWidth = event.detail.value;
-    try { renderer.setLineWidth(lineWidth); } catch (_) {}
-    refreshView();
+    focusedGraph?.setLineWidth(event.detail.value);
+    syncFromGraph();
   }
 
   function handlePointRadius(event: CustomEvent<{ value: number }>) {
-    pointRadius = event.detail.value;
-    try { renderer.setPointRadius(pointRadius); } catch (_) {}
-    refreshView();
+    focusedGraph?.setPointRadius(event.detail.value);
+    syncFromGraph();
   }
 
   function handleShowGrid(event: CustomEvent<{ value: boolean }>) {
-    showGrid = event.detail.value;
+    focusedGraph?.setShowGrid(event.detail.value);
+    syncFromGraph();
   }
 
   function handleNormalized(event: CustomEvent<{ value: boolean }>) {
-    normalized = event.detail.value;
-    try { renderer.setNormalized(normalized); } catch (_) {}
-    refreshView();
+    focusedGraph?.setNormalized(event.detail.value);
+    syncFromGraph();
   }
 
   // ── View mode (plot / table) ───────────────────────────────────────────────
-  let viewMode: 'plot' | 'table' = 'plot';
-  let tableView: TableView;
-
   async function toggleViewMode() {
-    viewMode = viewMode === 'plot' ? 'table' : 'plot';
-    if (viewMode === 'table') {
-      // Wait for Svelte to mount TableView before calling refresh()
-      await tick();
-      if (tableView) tableView.refresh();
-    }
+    await focusedGraph?.toggleViewMode();
+    syncFromGraph();
   }
 
   // ── Draw mode ──────────────────────────────────────────────────────────────
-  type DrawMode = 'lines' | 'step' | 'points';
-  const DRAW_MODES: DrawMode[] = ['lines', 'step', 'points'];
-  const DRAW_MODE_LABELS: Record<DrawMode, string> = { lines: 'Lines', step: 'Step', points: 'Points' };
-  let drawMode: DrawMode = 'lines';
-  let hasData = false;
+  const DRAW_MODE_LABELS: Record<'lines' | 'step' | 'points', string> = {
+    lines: 'Lines', step: 'Step', points: 'Points',
+  };
 
   function cycleDrawMode() {
-    if (!hasData) return;
-    const idx = DRAW_MODES.indexOf(drawMode);
-    drawMode = DRAW_MODES[(idx + 1) % DRAW_MODES.length];
-    renderer.setDrawMode(drawMode);
-    refreshView();
+    focusedGraph?.cycleDrawMode();
+    syncFromGraph();
   }
 
   function handleFit() {
-    renderer.autoFit();
-    refreshView();
+    focusedGraph?.fit();
+    syncFromGraph();
   }
 
   // ── Cursor mode ────────────────────────────────────────────────────────────
-  let cursorMode = false;
-  let cursors: CursorPoint[] = [];
-
   function toggleCursorMode() {
-    cursorMode = !cursorMode;
-    if (!cursorMode) {
-      cursors = []; // clear cursors when turning off
-    }
+    focusedGraph?.toggleCursorMode();
+    syncFromGraph();
   }
 
-  // ── Pan state ──────────────────────────────────────────────────────────────
-  let dragging = false;
-  let lastPx = 0;
-  let lastPy = 0;
-  // Track pointer-down CSS position for click-vs-drag discrimination
-  let pointerDownCssX = 0;
-  let pointerDownCssY = 0;
-  const CLICK_THRESHOLD_PX = 4;
-
-  /** CSS-pixel → canvas-backing-pixel scale factors. */
-  function pixelScale(): { sx: number; sy: number } {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      sx: canvas.width / rect.width,
-      sy: canvas.height / rect.height,
-    };
+  // ── Graph events ─────────────────────────────────────────────────────────────
+  function handleFocusRequest() {
+    // Single graph for now — already focused. (Multi-graph focus arrives later.)
   }
 
-  function onPointerDown(e: PointerEvent) {
-    if (e.button !== 0) return; // left button only — don't pan on right/middle click
-    dragging = true;
-    const { sx, sy } = pixelScale();
-    const rect = canvas.getBoundingClientRect();
-    // CSS px position (for click-vs-drag threshold)
-    pointerDownCssX = e.clientX - rect.left;
-    pointerDownCssY = e.clientY - rect.top;
-    // Backing-pixel position for pan
-    lastPx = pointerDownCssX * sx;
-    lastPy = pointerDownCssY * sy;
-    canvas.setPointerCapture(e.pointerId);
+  function handleXRange(_event: CustomEvent<{ x_min: number; x_max: number }>) {
+    // Cross-graph X-sync arrives in Task 4. Mirror view state for the panels.
+    syncFromGraph();
   }
 
-  function onPointerMove(e: PointerEvent) {
-    if (!dragging) return;
-    const { sx, sy } = pixelScale();
-    const rect = canvas.getBoundingClientRect();
-    const curX = (e.clientX - rect.left) * sx;
-    const curY = (e.clientY - rect.top) * sy;
-    const dx = curX - lastPx;
-    const dy = curY - lastPy;
-    lastPx = curX;
-    lastPy = curY;
-    renderer.pan(dx, dy);
-    refreshView();
+  function handleDataChanged() {
+    syncFromGraph();
   }
 
-  function onPointerUp(e: PointerEvent) {
-    if (!dragging) return;
-    dragging = false;
-
-    // Click-vs-drag: if movement in CSS px is below threshold AND cursorMode is on,
-    // treat as a cursor placement click.
-    const rect = canvas.getBoundingClientRect();
-    const upCssX = e.clientX - rect.left;
-    const upCssY = e.clientY - rect.top;
-    const moveDist = Math.sqrt(
-      (upCssX - pointerDownCssX) ** 2 + (upCssY - pointerDownCssY) ** 2
-    );
-
-    if (cursorMode && moveDist < CLICK_THRESHOLD_PX && viewState) {
-      // Convert CSS px → data coordinates using pointer-DOWN position
-      const dataX = viewState.x_min + (pointerDownCssX / rect.width) * (viewState.x_max - viewState.x_min);
-      const dataY = viewState.y_min + (1 - pointerDownCssY / rect.height) * (viewState.y_max - viewState.y_min);
-
-      if (cursors.length >= 2) {
-        // Cycle: reset to a single new cursor
-        cursors = [{ x: dataX, y: dataY }];
-      } else {
-        cursors = [...cursors, { x: dataX, y: dataY }];
-      }
-    }
+  /** The focused graph's renderer is live — apply the persisted-theme background. */
+  function handleGraphReady() {
+    applyTheme(prefs.theme, true);
+    syncFromGraph();
   }
 
-  function onPointerCancel(_e: PointerEvent) {
-    dragging = false;
+  /** A file dropped on the graph → run the open flow targeting that graph. */
+  function handleDropPath(event: CustomEvent<{ path: string }>) {
+    void openPath(event.detail.path);
   }
 
-  function onWheel(e: WheelEvent) {
-    e.preventDefault();
-    const { sx, sy } = pixelScale();
-    const rect = canvas.getBoundingClientRect();
-    const ax = (e.clientX - rect.left) * sx;
-    const ay = (e.clientY - rect.top) * sy;
-    // Browser deltaY is negative when scrolling up (zoom in).
-    // Core zoom uses: factor = (1 - scroll_y * 0.001); positive scroll_y → zoom in.
-    renderer.zoom(-e.deltaY, ax, ay);
-    refreshView();
-  }
-
-  function onDblClick(_e: MouseEvent) {
-    renderer.autoFit();
-    refreshView();
+  /** SeriesList mutated the focused graph's renderer (visibility/remove/move/fx). */
+  function handleSeriesChange() {
+    syncFromGraph();
   }
 
   onMount(async () => {
@@ -279,55 +193,16 @@
       // non-fatal: use defaults
     }
 
-    // Apply persisted theme to chrome immediately (renderer not ready yet).
+    // Apply persisted theme to chrome immediately (graph may not be ready yet).
     document.documentElement.setAttribute('data-theme', prefs.theme);
-
-    try {
-      await renderer.init();
-      await renderer.create(canvas);
-      // Now set the WebGPU background for the persisted theme and render.
-      applyTheme(prefs.theme, true);
-      refreshView();
-    } catch (e) {
-      error = String(e);
-    }
-
-    // Keep the GPU surface in sync with the canvas element size.
-    const ro = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          canvas.width = Math.round(width);
-          canvas.height = Math.round(height);
-          renderer.resize(canvas.width, canvas.height);
-          renderer.render();
-          refreshView();
-        }
-      }
-    });
-    ro.observe(canvas);
-
-    // Register Tauri drag-drop listener (OS drops give file paths; HTML5 ondrop does not).
-    const unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
-      const p = event.payload;
-      if (p.type === 'over') {
-        dragHover = true;
-      } else if (p.type === 'leave') {
-        dragHover = false;
-      } else if (p.type === 'drop') {
-        dragHover = false;
-        const path = (p as { type: string; paths?: string[] }).paths?.[0];
-        if (path) { void openPath(path); }
-      }
-    });
-
-    return () => {
-      ro.disconnect();
-      unlistenDrop();
-    };
+    // Apply the persisted-theme WebGPU background. Child `onMount` (the graph's
+    // renderer init) and this parent `onMount` race; applyTheme is idempotent and
+    // setBackground no-ops if the renderer isn't ready, and the graph also fires
+    // `ready` → handleGraphReady, so whichever finishes last sets it correctly.
+    applyTheme(prefs.theme, true);
   });
 
-  /** Load a file at a known path (shared by dialog-pick and recent-click). */
+  /** Load a file at a known path (shared by dialog-pick, recent-click, drag-drop). */
   async function openPath(path: string) {
     loading = true;
     error = null;
@@ -336,7 +211,7 @@
       const numArr = await readFile(path);
       const bytes = new Uint8Array(numArr);
       const filename = path.split(/[\\/]/).pop() ?? path;
-      fileMeta = renderer.loadFileBytes(bytes, filename);
+      fileMeta = focusedGraph.loadBytes(bytes, filename);
       await recordRecentFile(path);
     } catch (e) {
       error = `Failed to open file: ${e}`;
@@ -371,15 +246,8 @@
     fileMeta = null; // close dialog
     error = null;
     try {
-      renderer.setSeries(specs);
-      hasData = true;
-      drawMode = 'lines'; // reset to default on new data load
-      refreshView();
-      refreshSeriesInfo();
-      // If already in table mode, refresh the table with new data (tick ensures component is mounted)
-      if (viewMode === 'table') {
-        tick().then(() => { if (tableView) tableView.refresh(); });
-      }
+      focusedGraph.setSeries(specs);
+      syncFromGraph();
     } catch (e) {
       error = `Failed to render series: ${e}`;
     }
@@ -395,7 +263,7 @@
     if (!hasData) return;
     error = null;
     try {
-      const csv = renderer.exportCsv();
+      const csv = focusedGraph.exportCsv();
       const bytes = new TextEncoder().encode(csv);
       await saveFile('oxideplot.csv', bytes);
     } catch (e) {
@@ -407,11 +275,7 @@
     if (!hasData) return;
     error = null;
     try {
-      // Render immediately before capturing so the drawing buffer is current.
-      renderer.render();
-      const blob = await new Promise<Blob | null>((resolve) => {
-        canvas.toBlob((b) => resolve(b), 'image/png');
-      });
+      const blob = await focusedGraph.capturePng();
       if (!blob) {
         error = 'PNG capture returned null — the WebGPU canvas may not support toBlob.';
         return;
@@ -428,10 +292,7 @@
     if (!hasData) return;
     error = null;
     try {
-      renderer.render();
-      const blob = await new Promise<Blob | null>((resolve) => {
-        canvas.toBlob((b) => resolve(b), 'image/png');
-      });
+      const blob = await focusedGraph.capturePng();
       if (!blob) {
         error = 'PNG capture returned null — clipboard copy unavailable.';
         return;
@@ -570,60 +431,41 @@
     {/if}
   </div>
 
-  <!-- Table view — rendered alongside (not replacing) the canvas -->
-  {#if hasData && viewMode === 'table'}
-    <TableView bind:this={tableView} {renderer} />
-  {/if}
+  <!-- Workspace: the focused graph plus its overlay panels. The relative wrapper
+       gives the absolutely-positioned SeriesList/Settings panels (which target
+       the focused graph) a positioning context over the plot. -->
+  <div class="workspace">
+    <Graph
+      bind:this={focusedGraph}
+      focused={true}
+      on:ready={handleGraphReady}
+      on:focusrequest={handleFocusRequest}
+      on:xrange={handleXRange}
+      on:datachanged={handleDataChanged}
+      on:droppath={handleDropPath}
+    />
 
-  <!-- Plot canvas + axis overlay — fills the remaining space; hidden (not unmounted) in table mode -->
-  <div class="canvas-wrap" class:hidden={viewMode === 'table'}>
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <canvas
-      bind:this={canvas}
-      style={cursorMode ? 'cursor:crosshair' : ''}
-      on:pointerdown={onPointerDown}
-      on:pointermove={onPointerMove}
-      on:pointerup={onPointerUp}
-      on:pointercancel={onPointerCancel}
-      on:wheel={onWheel}
-      on:dblclick={onDblClick}
-    ></canvas>
-    <Axes
-      {ticks}
-      {viewState}
-      displayW={canvas ? canvas.getBoundingClientRect().width : 0}
-      displayH={canvas ? canvas.getBoundingClientRect().height : 0}
-      {showGrid}
-    />
-    <Cursors
-      {cursors}
-      {viewState}
-      displayW={canvas ? canvas.getBoundingClientRect().width : 0}
-      displayH={canvas ? canvas.getBoundingClientRect().height : 0}
-    />
-    {#if seriesInfo.length > 0}
-      <SeriesList
-        series={seriesInfo}
-        {renderer}
-        on:change={handleSeriesChange}
-      />
-    {/if}
-    {#if showSettings}
-      <Settings
-        {lineWidth}
-        {pointRadius}
-        {showGrid}
-        {normalized}
-        on:linewidth={handleLineWidth}
-        on:pointradius={handlePointRadius}
-        on:showgrid={handleShowGrid}
-        on:normalized={handleNormalized}
-      />
-    {/if}
-    {#if dragHover}
-      <div class="drop-overlay" aria-hidden="true">
-        <span class="drop-label">Drop a CSV / Excel file to open</span>
-      </div>
+    <!-- Focused-graph panels (hidden in table mode, matching prior behavior). -->
+    {#if viewMode === 'plot'}
+      {#if seriesInfo.length > 0 && focusedGraph}
+        <SeriesList
+          series={seriesInfo}
+          renderer={focusedGraph.renderer}
+          on:change={handleSeriesChange}
+        />
+      {/if}
+      {#if showSettings}
+        <Settings
+          {lineWidth}
+          {pointRadius}
+          {showGrid}
+          {normalized}
+          on:linewidth={handleLineWidth}
+          on:pointradius={handlePointRadius}
+          on:showgrid={handleShowGrid}
+          on:normalized={handleNormalized}
+        />
+      {/if}
     {/if}
   </div>
 
@@ -786,6 +628,16 @@
     box-sizing: border-box;
   }
 
+  /* Workspace holds the graph + its overlay panels; relative so the panels'
+     absolute positioning anchors to the plot area. */
+  .workspace {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
   .open-btn {
     padding: 5px 16px;
     background: var(--accent);
@@ -931,52 +783,5 @@
   .recent-item:hover {
     background: var(--recent-item-hover);
     color: var(--btn-hover-text);
-  }
-
-  .canvas-wrap {
-    position: relative;
-    flex: 1;
-    overflow: hidden;
-  }
-
-  /* Hide the canvas wrap without unmounting it (preserves the wgpu surface). */
-  .canvas-wrap.hidden {
-    display: none;
-  }
-
-  canvas {
-    display: block;
-    width: 100%;
-    height: 100%;
-    cursor: grab;
-  }
-
-  canvas:active {
-    cursor: grabbing;
-  }
-
-  /* ── Drag-drop hover overlay ── */
-  .drop-overlay {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 2px dashed var(--btn-active-border);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--btn-active-bg) 18%, transparent);
-    z-index: 200;
-  }
-
-  .drop-label {
-    padding: 10px 24px;
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: var(--btn-active-text);
-    background: var(--panel-bg-alpha);
-    border: 1px solid var(--btn-active-border);
-    border-radius: 8px;
-    letter-spacing: 0.02em;
   }
 </style>
