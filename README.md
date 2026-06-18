@@ -73,15 +73,15 @@ src/                   Svelte 5 frontend
 npm install
 
 # 2. Build the WASM module (must be run on a fresh checkout — src/lib/wasm/ is gitignored)
-npm run build:wasm
-# Equivalent to: wasm-pack build crates/oxideplot-wasm --target web --out-dir ../../src/lib/wasm
-# For a dev (unoptimized) build the dev script adds --dev; omit it for release.
+npm run build:wasm            # dev profile: unoptimized + fast, for `tauri dev`
+# npm run build:wasm:release  # optimized (wasm-opt) — run automatically by `tauri build`
 
 # 3. Run in development mode (hot-reload frontend, debug Tauri backend)
 npx tauri dev
 
 # 4. Package for distribution (produces MSI + NSIS installers)
 npx tauri build
+# Automatically rebuilds the OPTIMIZED WASM (build:wasm:release) before bundling.
 # Installers land in target/release/bundle/
 ```
 

@@ -1,3 +1,6 @@
+//! Orbital camera for 3D plotting. Retained for the planned 3D-renderer
+//! roadmap; not used by the current 2D MVP. Exposed as `pub` API.
+
 use glam::{Mat4, Vec3};
 use std::f32::consts::PI;
 

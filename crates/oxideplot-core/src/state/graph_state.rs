@@ -1,3 +1,8 @@
+//! Multi-series graph model (series, axes, cursors, axis-sync groups).
+//! Retained for the planned 3D-plotting / MCP-server roadmap — the current 2D
+//! MVP builds GPU series directly and does not yet consume `GraphState`.
+//! Exposed as `pub` API rather than removed.
+
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use crate::state::data_series::{DataSeries, PlotMode, color_for_index};
@@ -95,8 +100,8 @@ pub struct GraphState {
     pub y_axes: HashMap<String, AxisState>,
     pub sync_partner_ids: Vec<u64>,
     /// Shared axis-link group identifier. All graphs in the same sync group
-    /// share the same value so that `egui_plot::Plot::link_axis` can tie them
-    /// together.  Computed as the minimum graph-id in the group.
+    /// share the same value so their axes can be linked together. Computed as
+    /// the minimum graph-id in the group.
     #[serde(skip)]
     pub sync_group_id: Option<u64>,
     pub show_data_table: bool,
