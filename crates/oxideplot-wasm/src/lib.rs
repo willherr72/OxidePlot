@@ -32,6 +32,7 @@ mod wasm_impl {
     use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
     use oxideplot_core::render::renderer::PlotRenderer;
     use oxideplot_core::data::loader::{LoadedData, FileMeta, load_from_bytes, column_to_f64, column_to_timestamps};
+    use oxideplot_core::data::table::{ColFilter, TableQuery, compute_view_index, window_rows};
     use oxideplot_core::processing::downsampling::downsample_for_view;
     use oxideplot_core::state::plot_view::PlotViewState;
     use oxideplot_core::geom::{Pos2, Rect};
@@ -81,6 +82,21 @@ mod wasm_impl {
         x_max: f64,
         y_min: f64,
         y_max: f64,
+    }
+
+    /// Serialisable info about one column, returned by `table_columns`.
+    #[derive(Serialize)]
+    struct TableColumnInfo {
+        name: String,
+        numeric: bool,
+    }
+
+    /// Deserialised filter spec from JS for `table_set_column_filter`.
+    #[derive(Deserialize)]
+    struct FilterSpec {
+        text: Option<String>,
+        min: Option<f64>,
+        max: Option<f64>,
     }
 
     #[derive(Serialize)]
@@ -157,6 +173,10 @@ mod wasm_impl {
         /// When true, each series' Y is rescaled to [0, 1] (per-source global range)
         /// before building GPU points, and the Y view is set to [-0.05, 1.05].
         normalized: bool,
+        /// Current table query (sort, search, per-column filters, numeric_cols).
+        table_query: TableQuery,
+        /// Filtered + sorted row indices for the current table_query.
+        table_index: Vec<usize>,
     }
 
     #[wasm_bindgen]
@@ -213,6 +233,8 @@ mod wasm_impl {
                 point_radius: 3.0,
                 bg_color: [0.10_f64, 0.10, 0.12, 1.0],
                 normalized: false,
+                table_query: TableQuery::default(),
+                table_index: vec![],
             }
         }
 
@@ -242,6 +264,25 @@ mod wasm_impl {
             // Clear any previous series until the user picks new columns.
             self.sources.clear();
             self.series.clear();
+
+            // Initialise numeric_cols: a column is numeric if it parses as f64
+            // (≥ 50% success rate) OR if it parses as timestamps.
+            // This matches the rule used for ColumnMeta.kind (numeric/datetime → numeric; text → false).
+            {
+                let d = self.loaded.as_ref().unwrap();
+                let num_cols = d.column_data.len();
+                let mut numeric_cols = vec![false; num_cols];
+                for (i, col) in d.column_data.iter().enumerate() {
+                    let is_num = column_to_f64(col).1 >= 0.5 || column_to_timestamps(col).is_some();
+                    numeric_cols[i] = is_num;
+                }
+                // Reset table_query to defaults but preserve the new numeric_cols.
+                self.table_query = TableQuery {
+                    numeric_cols,
+                    ..TableQuery::default()
+                };
+                self.rebuild_table_index();
+            }
 
             serde_wasm_bindgen::to_value(&meta)
                 .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -740,6 +781,91 @@ mod wasm_impl {
             rows.join("\n")
         }
 
+        // ── Table API ─────────────────────────────────────────────────────────
+
+        /// Return column metadata as `[{ name: string, numeric: boolean }]`.
+        #[wasm_bindgen]
+        pub fn table_columns(&self) -> Result<JsValue, JsValue> {
+            let cols: Vec<TableColumnInfo> = match &self.loaded {
+                None => vec![],
+                Some(d) => d
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| TableColumnInfo {
+                        name: name.clone(),
+                        numeric: self.table_query.numeric_cols.get(i).copied().unwrap_or(false),
+                    })
+                    .collect(),
+            };
+            serde_wasm_bindgen::to_value(&cols).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+
+        /// Set sort: column index + direction; rebuilds the view index.
+        #[wasm_bindgen]
+        pub fn table_set_sort(&mut self, col: usize, ascending: bool) {
+            self.table_query.sort = Some((col, ascending));
+            self.rebuild_table_index();
+        }
+
+        /// Clear sort (restore original row order); rebuilds the view index.
+        #[wasm_bindgen]
+        pub fn table_clear_sort(&mut self) {
+            self.table_query.sort = None;
+            self.rebuild_table_index();
+        }
+
+        /// Set global search term; rebuilds the view index.
+        #[wasm_bindgen]
+        pub fn table_set_search(&mut self, term: String) {
+            self.table_query.search = term;
+            self.rebuild_table_index();
+        }
+
+        /// Set or clear a per-column filter.
+        ///
+        /// `spec` is a JS value of shape:
+        /// - `null` / `undefined` → remove the filter for `col`
+        /// - `{ text: string }` → `ColFilter::Text`
+        /// - `{ min?: number, max?: number }` → `ColFilter::Range`
+        #[wasm_bindgen]
+        pub fn table_set_column_filter(&mut self, col: usize, spec: JsValue) -> Result<(), JsValue> {
+            if spec.is_null() || spec.is_undefined() {
+                self.table_query.col_filters.remove(&col);
+            } else {
+                let fs: FilterSpec = serde_wasm_bindgen::from_value(spec)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                if let Some(text) = fs.text {
+                    self.table_query.col_filters.insert(col, ColFilter::Text(text));
+                } else if fs.min.is_some() || fs.max.is_some() {
+                    self.table_query.col_filters.insert(col, ColFilter::Range { min: fs.min, max: fs.max });
+                } else {
+                    // All None → clear the filter.
+                    self.table_query.col_filters.remove(&col);
+                }
+            }
+            self.rebuild_table_index();
+            Ok(())
+        }
+
+        /// Return the number of rows visible under the current filters/sort.
+        #[wasm_bindgen]
+        pub fn table_row_count(&self) -> usize {
+            self.table_index.len()
+        }
+
+        /// Return a window of rows `[start, start+count)` from the current view
+        /// as `string[][]` — each inner array is one row, each string is one cell.
+        #[wasm_bindgen]
+        pub fn table_window(&self, start: usize, count: usize) -> Result<JsValue, JsValue> {
+            let rows = self
+                .loaded
+                .as_ref()
+                .map(|d| window_rows(d, &self.table_index, start, count))
+                .unwrap_or_default();
+            serde_wasm_bindgen::to_value(&rows).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+
         // ── Private helpers ───────────────────────────────────────────────────
 
         /// Rebuild `self.series` by LTTB-downsampling each source series to the
@@ -813,6 +939,13 @@ mod wasm_impl {
                     }
                 })
                 .collect();
+        }
+
+        /// Recompute the filtered+sorted row index from the current table_query.
+        fn rebuild_table_index(&mut self) {
+            if let Some(d) = &self.loaded {
+                self.table_index = compute_view_index(d, &self.table_query);
+            }
         }
 
         /// Build a canvas-sized Rect (backing-store pixels, origin at top-left).

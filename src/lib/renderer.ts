@@ -35,6 +35,11 @@ export interface ViewState {
   y_max: number;
 }
 
+export interface TableColumn {
+  name: string;
+  numeric: boolean;
+}
+
 export interface SeriesInfoEntry {
   name: string;
   color: [number, number, number, number];
@@ -258,6 +263,60 @@ export class Renderer {
   setNormalized(on: boolean): void {
     this.assertPlot();
     (this.plot as any).set_normalized(on);
+  }
+
+  // ── Table API ─────────────────────────────────────────────────────────────
+
+  /** Return column metadata `[{ name, numeric }]` for the loaded file. */
+  tableColumns(): TableColumn[] {
+    this.assertPlot();
+    return this.plot!.table_columns() as TableColumn[];
+  }
+
+  /** Sort the table by column index and direction; rebuilds the view index. */
+  tableSetSort(col: number, ascending: boolean): void {
+    this.assertPlot();
+    this.plot!.table_set_sort(col, ascending);
+  }
+
+  /** Clear sort, restoring original row order; rebuilds the view index. */
+  tableClearSort(): void {
+    this.assertPlot();
+    this.plot!.table_clear_sort();
+  }
+
+  /** Set the global full-text search term; rebuilds the view index. */
+  tableSetSearch(term: string): void {
+    this.assertPlot();
+    this.plot!.table_set_search(term);
+  }
+
+  /**
+   * Set or clear a per-column filter; rebuilds the view index.
+   * Pass `null` to clear the filter for `col`.
+   * Pass `{ text }` for a substring match, `{ min?, max? }` for a numeric range.
+   */
+  tableSetColumnFilter(
+    col: number,
+    spec: { text?: string; min?: number; max?: number } | null,
+  ): void {
+    this.assertPlot();
+    this.plot!.table_set_column_filter(col, spec);
+  }
+
+  /** Return the number of rows visible under the current filters/sort. */
+  tableRowCount(): number {
+    this.assertPlot();
+    return this.plot!.table_row_count();
+  }
+
+  /**
+   * Return a window of rows `[start, start+count)` from the current view
+   * as `string[][]` — each inner array is one row, each string one cell.
+   */
+  tableWindow(start: number, count: number): string[][] {
+    this.assertPlot();
+    return this.plot!.table_window(start, count) as string[][];
   }
 
   private assertPlot(): void {
