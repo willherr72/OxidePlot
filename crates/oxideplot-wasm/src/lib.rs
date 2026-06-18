@@ -38,6 +38,7 @@ mod wasm_impl {
     use oxideplot_core::geom::{Pos2, Rect};
     use oxideplot_core::render::axis::{compute_grid_lines, format_tick_value};
     use oxideplot_core::data::datetime::format_timestamp;
+    use oxideplot_core::processing::math_ops;
 
     /// Minimum target point count when width is very small.
     const MIN_TARGET_POINTS: usize = 800;
@@ -56,6 +57,53 @@ mod wasm_impl {
         /// Used for per-source normalization in rebuild_visible when normalized mode is on.
         y_min: f64,
         y_max: f64,
+    }
+
+    /// Parameters for `add_transform`, deserialised from a JS object.
+    /// All fields are optional — missing keys → `None`.
+    #[derive(serde::Deserialize, Default)]
+    struct TransformParams {
+        window: Option<usize>,
+        mode: Option<String>,
+    }
+
+    /// The colour palette used by `ColumnDialog` on the JS side.
+    /// `add_transform` picks from this palette by series count so derived
+    /// series blend visually with the source series.
+    const PALETTE: [[f32; 4]; 8] = [
+        [0.20, 0.85, 1.00, 1.0], // bright cyan
+        [1.00, 0.60, 0.10, 1.0], // amber
+        [0.40, 1.00, 0.40, 1.0], // lime green
+        [1.00, 0.30, 0.30, 1.0], // coral
+        [0.80, 0.40, 1.00, 1.0], // violet
+        [1.00, 0.90, 0.10, 1.0], // yellow
+        [0.10, 0.90, 0.70, 1.0], // teal
+        [1.00, 0.55, 0.80, 1.0], // pink
+    ];
+
+    /// Pick a palette colour by cycling over `PALETTE` at `index`.
+    fn palette_color(index: usize) -> [f32; 4] {
+        PALETTE[index % PALETTE.len()]
+    }
+
+    /// Compute the global Y min/max over a slice of finite values.
+    /// Matches the rule used in `set_series`: if the range is degenerate
+    /// (empty, non-finite, or < 1e-15), return `(center−1, center+1)`.
+    fn compute_y_bounds(ys: &[f64]) -> (f64, f64) {
+        let mut mn = f64::INFINITY;
+        let mut mx = f64::NEG_INFINITY;
+        for &y in ys {
+            if y.is_finite() {
+                mn = mn.min(y);
+                mx = mx.max(y);
+            }
+        }
+        if !mn.is_finite() || !mx.is_finite() || (mx - mn).abs() < 1e-15 {
+            let center = if mn.is_finite() { mn } else { 0.0 };
+            (center - 1.0, center + 1.0)
+        } else {
+            (mn, mx)
+        }
     }
 
     /// Serialisable info about one series, returned by `series_info`.
@@ -864,6 +912,86 @@ mod wasm_impl {
                 .map(|d| window_rows(d, &self.table_index, start, count))
                 .unwrap_or_default();
             serde_wasm_bindgen::to_value(&rows).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+
+        // ── Transform API ─────────────────────────────────────────────────────
+
+        /// Append a derived series built from a math transform of an existing source.
+        ///
+        /// `source_index` — index into `self.sources` (bounds-checked).
+        /// `kind`         — one of `"moving_average"`, `"derivative"`, `"integral"`,
+        ///                  `"normalize"`, `"abs"`, `"log"`, `"sqrt"`.
+        /// `params`       — optional JS object `{ window?: number, mode?: string }`;
+        ///                  pass `null` / `undefined` to use defaults.
+        ///
+        /// The new series inherits the source's X data and `x_name`, gets a label
+        /// that describes the transform, is assigned the next palette colour, and is
+        /// immediately visible.  `auto_fit()` is called so the new series renders.
+        #[wasm_bindgen]
+        pub fn add_transform(
+            &mut self,
+            source_index: usize,
+            kind: String,
+            params: JsValue,
+        ) -> Result<(), JsValue> {
+            let src = self.sources.get(source_index)
+                .ok_or_else(|| JsValue::from_str("source index out of range"))?;
+
+            let p: TransformParams = if params.is_null() || params.is_undefined() {
+                TransformParams::default()
+            } else {
+                serde_wasm_bindgen::from_value(params)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?
+            };
+
+            let xs   = src.xs.clone();
+            let base = src.name.clone();
+            let x_name = src.x_name.clone();
+
+            let (new_ys, label) = match kind.as_str() {
+                "moving_average" => {
+                    let w = p.window.unwrap_or(5).max(1);
+                    (math_ops::moving_average(&src.ys, w), format!("{base} · MA({w})"))
+                }
+                "derivative" => (math_ops::derivative(&src.xs, &src.ys), format!("d/dx({base})")),
+                "integral"   => (math_ops::integral(&src.xs, &src.ys), format!("∫({base})")),
+                "normalize"  => {
+                    let zscore = p.mode.as_deref() == Some("zscore");
+                    let label = if zscore {
+                        format!("z({base})")
+                    } else {
+                        format!("norm({base})")
+                    };
+                    (math_ops::normalize(&src.ys, zscore), label)
+                }
+                "abs"  => (math_ops::map_abs(&src.ys),  format!("|{base}|")),
+                "log"  => (math_ops::map_ln(&src.ys),   format!("log({base})")),
+                "sqrt" => (math_ops::map_sqrt(&src.ys), format!("√({base})")),
+                other  => return Err(JsValue::from_str(&format!("unknown transform: {other}"))),
+            };
+
+            // Color: cycle the shared palette by current series count (same palette
+            // ColumnDialog.svelte uses on the JS side).
+            let color = palette_color(self.sources.len());
+
+            // Y bounds: same degenerate-safe rule as set_series.
+            let (y_min, y_max) = compute_y_bounds(&new_ys);
+
+            self.sources.push(SourceSeries {
+                name: label,
+                x_name,
+                visible: true,
+                xs,
+                ys: new_ys,
+                color,
+                draw_mode: DrawMode::Lines,
+                y_min,
+                y_max,
+            });
+
+            // auto_fit calls rebuild_visible + render — new series is immediately visible.
+            self.auto_fit();
+            Ok(())
         }
 
         // ── Private helpers ───────────────────────────────────────────────────

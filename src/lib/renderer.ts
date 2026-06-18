@@ -265,6 +265,25 @@ export class Renderer {
     (this.plot as any).set_normalized(on);
   }
 
+  /**
+   * Append a derived series built from a math transform of the source at `sourceIndex`.
+   *
+   * `kind` — one of `'moving_average'`, `'derivative'`, `'integral'`,
+   *           `'normalize'`, `'abs'`, `'log'`, `'sqrt'`.
+   * `params` — optional `{ window?, mode? }`; pass `null` to use defaults.
+   *
+   * The new series is added, auto-fitted, and rendered immediately.
+   * Throws if `sourceIndex` is out of range or `kind` is unrecognised.
+   */
+  addTransform(
+    sourceIndex: number,
+    kind: string,
+    params: { window?: number; mode?: string } | null,
+  ): void {
+    this.assertPlot();
+    (this.plot as any).add_transform(sourceIndex, kind, params);
+  }
+
   // ── Table API ─────────────────────────────────────────────────────────────
 
   /** Return column metadata `[{ name, numeric }]` for the loaded file. */
