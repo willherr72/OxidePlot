@@ -286,10 +286,11 @@
       const numArr = await readFile(path);
       const bytes = new Uint8Array(numArr);
       const filename = path.split(/[\\/]/).pop() ?? path;
-      // Cache the bytes at workspace level so other (empty) graphs can reuse them.
+      fileMeta = g.loadBytes(bytes, filename);
+      // Cache the bytes at workspace level (only after a successful parse) so
+      // other (empty) graphs can reuse them without re-reading from disk.
       loadedBytes = bytes;
       loadedName = filename;
-      fileMeta = g.loadBytes(bytes, filename);
       await recordRecentFile(path);
     } catch (e) {
       error = `Failed to open file: ${e}`;
