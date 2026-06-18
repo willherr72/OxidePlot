@@ -109,6 +109,16 @@
   let error: string | null = null;
   let loading = false;
 
+  // ── Workspace-level byte cache (shared dataset) ───────────────────────────────
+  // Bytes are read from disk once on open and cached here. A newly-added (empty)
+  // graph can reuse the cached bytes to parse the same dataset and pick its own
+  // columns, without re-reading from disk.
+  let loadedBytes: Uint8Array | null = null;
+  let loadedName = '';
+
+  /** True when the cache has bytes AND the focused graph has no series (empty). */
+  $: canUseLoadedData = loadedBytes !== null && seriesInfo.length === 0;
+
   // ── Prefs ──────────────────────────────────────────────────────────────────
   interface Prefs {
     recentFiles: string[];
@@ -276,6 +286,9 @@
       const numArr = await readFile(path);
       const bytes = new Uint8Array(numArr);
       const filename = path.split(/[\\/]/).pop() ?? path;
+      // Cache the bytes at workspace level so other (empty) graphs can reuse them.
+      loadedBytes = bytes;
+      loadedName = filename;
       fileMeta = g.loadBytes(bytes, filename);
       await recordRecentFile(path);
     } catch (e) {
@@ -322,6 +335,20 @@
 
   function handleCancel() {
     fileMeta = null;
+  }
+
+  /** Load the cached bytes into the focused (empty) graph so the user can pick
+   *  their own columns from the same dataset — identical flow to a fresh open,
+   *  no disk read. Only callable when `canUseLoadedData` is true. */
+  function handleUseLoadedData() {
+    const g = focusedGraph;
+    if (!g || !loadedBytes) return;
+    error = null;
+    try {
+      fileMeta = g.loadBytes(loadedBytes, loadedName);
+    } catch (e) {
+      error = `Failed to load cached data: ${e}`;
+    }
   }
 
   // ── Export ─────────────────────────────────────────────────────────────────
@@ -416,6 +443,16 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       Add Graph
     </button>
+    {#if canUseLoadedData}
+      <button
+        class="cursor-btn"
+        on:click={handleUseLoadedData}
+        title="Load the cached dataset into this graph so you can pick its own series"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Use loaded data
+      </button>
+    {/if}
     <button
       class="cursor-btn"
       disabled={!hasData}
