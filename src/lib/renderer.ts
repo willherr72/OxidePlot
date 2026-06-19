@@ -188,6 +188,14 @@ export class Renderer {
   }
 
   /**
+   * Set the RGB color of a series by index (components in 0..1) and re-render.
+   */
+  setSeriesColor(index: number, r: number, g: number, b: number): void {
+    this.assertPlot();
+    (this.plot as any).set_series_color(index, r, g, b);
+  }
+
+  /**
    * Remove the series at `index` and re-render.
    */
   removeSeries(index: number): void {

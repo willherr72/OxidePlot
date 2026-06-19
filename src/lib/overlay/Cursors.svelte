@@ -96,7 +96,7 @@
   {/each}
 </svg>
 
-<!-- Readout panel — positioned top-right, HTML div for easy text layout -->
+<!-- Readout panel — top-left (the series panel lives top-right), HTML div for easy text layout -->
 <div class="cursor-readout" style="pointer-events:none">
   {#each cursors as c, i}
     {@const color = CURSOR_COLORS[i] ?? '#ffffff'}
@@ -119,16 +119,17 @@
   .cursor-readout {
     position: absolute;
     top: 10px;
-    right: 10px;
+    left: 10px;
     background: var(--cursor-readout-bg);
     border: 1px solid var(--cursor-readout-border);
-    border-radius: 6px;
+    border-radius: var(--radius);
     padding: 7px 10px;
-    font-family: monospace;
+    font-family: var(--font-data);
     font-size: 11px;
     color: var(--cursor-readout-text);
     min-width: 200px;
     user-select: none;
+    backdrop-filter: blur(4px);
   }
 
   .cursor-row {

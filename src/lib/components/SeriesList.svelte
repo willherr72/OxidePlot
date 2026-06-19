@@ -18,6 +18,22 @@
     return `rgba(${r * 255 | 0}, ${g * 255 | 0}, ${b * 255 | 0}, ${a})`;
   }
 
+  /** Convert a [r,g,b,a] (0..1) color to a #rrggbb hex string for <input type=color>. */
+  function toHex(color: [number, number, number, number]): string {
+    const h = (v: number) =>
+      Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0');
+    return `#${h(color[0])}${h(color[1])}${h(color[2])}`;
+  }
+
+  /** Apply a hex color picked from the swatch's color input to series `i`. */
+  function changeColor(i: number, hex: string) {
+    const r = parseInt(hex.slice(1, 3), 16) / 255;
+    const g = parseInt(hex.slice(3, 5), 16) / 255;
+    const b = parseInt(hex.slice(5, 7), 16) / 255;
+    renderer.setSeriesColor(i, r, g, b);
+    dispatch('change');
+  }
+
   function toggleVisible(i: number, visible: boolean) {
     renderer.setSeriesVisible(i, visible);
     dispatch('change');
@@ -93,8 +109,17 @@
     {#each series as s, i}
       <li class="series-item">
         <div class="series-row" class:hidden={!s.visible}>
-          <!-- Color swatch -->
-          <span class="swatch" style="background:{toCSS(s.color)}"></span>
+          <!-- Color swatch — click to pick a custom color -->
+          <label class="swatch-label" title="Click to change color">
+            <span class="swatch" style="background:{toCSS(s.color)}"></span>
+            <input
+              class="swatch-input"
+              type="color"
+              value={toHex(s.color)}
+              on:input={(e) => changeColor(i, e.currentTarget.value)}
+              aria-label="Change series color"
+            />
+          </label>
           <!-- Name -->
           <span class="series-name" title={s.name}>{s.name}</span>
           <!-- Controls -->
@@ -254,13 +279,38 @@
     opacity: 0.45;
   }
 
+  .swatch-label {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    line-height: 0;
+    cursor: pointer;
+  }
+  /* Native color input overlaid invisibly on the swatch so a click opens the
+     OS color picker. */
+  .swatch-input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: none;
+    opacity: 0;
+    cursor: pointer;
+  }
   .swatch {
     display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
     flex-shrink: 0;
     border: 1px solid var(--swatch-border);
+    transition: transform 0.12s, box-shadow 0.12s;
+  }
+  .swatch-label:hover .swatch {
+    transform: scale(1.12);
+    box-shadow: 0 0 0 2px var(--accent-dim);
   }
 
   .series-name {

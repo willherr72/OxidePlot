@@ -689,6 +689,18 @@ mod wasm_impl {
             self.render();
         }
 
+        /// Set the RGB color of the series at `index` (components in 0..1;
+        /// alpha kept at 1) and re-render.
+        #[wasm_bindgen]
+        pub fn set_series_color(&mut self, index: usize, r: f32, g: f32, b: f32) {
+            if index >= self.sources.len() {
+                return;
+            }
+            self.sources[index].color = [r, g, b, 1.0];
+            self.rebuild_visible();
+            self.render();
+        }
+
         /// Remove the series at `index` and re-render.
         #[wasm_bindgen]
         pub fn remove_series(&mut self, index: usize) {
