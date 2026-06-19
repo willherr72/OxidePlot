@@ -110,14 +110,14 @@
     right: 8px;
     z-index: 100;
     background: var(--panel-bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    border: 1px solid var(--border-mid);
+    border-radius: var(--radius);
     padding: 12px 16px;
     min-width: 220px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-panel);
     color: var(--text-dim);
-    font-family: sans-serif;
-    font-size: 0.82rem;
+    font-family: var(--font-ui);
+    font-size: 0.8rem;
   }
 
   .settings-header {

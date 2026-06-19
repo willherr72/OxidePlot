@@ -442,6 +442,16 @@
     displayW={canvas ? canvas.getBoundingClientRect().width : 0}
     displayH={canvas ? canvas.getBoundingClientRect().height : 0}
   />
+  {#if !hasData}
+    <div class="empty-state" aria-hidden="true">
+      <svg class="empty-mark" width="60" height="60" viewBox="0 0 24 24" fill="none">
+        <rect x="1.5" y="1.5" width="21" height="21" rx="5.5" stroke="var(--border-mid)" stroke-width="1.1"/>
+        <path d="M4 16 L8.5 16 L11.5 7 L14.5 18.5 L20 11" stroke="var(--accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity="0.75"/>
+      </svg>
+      <div class="empty-title">No data loaded</div>
+      <div class="empty-hint">Open a CSV or Excel file — or drop one here</div>
+    </div>
+  {/if}
   {#if dragHover}
     <div class="drop-overlay" aria-hidden="true">
       <span class="drop-label">Drop a CSV / Excel file to open</span>
@@ -479,28 +489,63 @@
     cursor: grabbing;
   }
 
-  /* ── Drag-drop hover overlay ── */
-  .drop-overlay {
+  /* ── Empty state (no data loaded) ── */
+  .empty-state {
     position: absolute;
     inset: 0;
     pointer-events: none;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    border: 2px dashed var(--btn-active-border);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--btn-active-bg) 18%, transparent);
+    gap: 6px;
+    z-index: 5;
+    user-select: none;
+  }
+  .empty-mark {
+    margin-bottom: 14px;
+    filter: drop-shadow(0 0 12px var(--accent-dim));
+    opacity: 0.9;
+  }
+  .empty-title {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .empty-hint {
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+  }
+
+  /* ── Drag-drop hover overlay ── */
+  .drop-overlay {
+    position: absolute;
+    inset: 10px;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1.5px dashed var(--accent);
+    border-radius: var(--radius);
+    background: var(--accent-bg);
     z-index: 200;
   }
 
   .drop-label {
-    padding: 10px 24px;
-    font-size: 1.1rem;
+    padding: 10px 22px;
+    font-family: var(--font-ui);
+    font-size: 0.82rem;
     font-weight: 600;
-    color: var(--btn-active-text);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
     background: var(--panel-bg-alpha);
-    border: 1px solid var(--btn-active-border);
-    border-radius: 8px;
-    letter-spacing: 0.02em;
+    border: 1px solid var(--accent-dim);
+    border-radius: var(--radius);
   }
 </style>

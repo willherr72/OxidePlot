@@ -130,8 +130,8 @@
 
   /** Per-theme WebGPU background color [r, g, b, a]. */
   const THEME_BG: Record<string, [number, number, number, number]> = {
-    dark:  [0.10, 0.10, 0.12, 1.0],
-    light: [0.97, 0.97, 0.98, 1.0],
+    dark:  [0.055, 0.059, 0.075, 1.0], // matches --bg #0e0f13 (graphite)
+    light: [0.957, 0.957, 0.945, 1.0], // matches --bg #f4f4f1 (warm paper)
   };
 
   /** Apply the given theme to the document root and (if a graph is ready)
@@ -431,152 +431,128 @@
 </script>
 
 <main>
-  <!-- Toolbar -->
-  <div class="toolbar">
-    <button class="open-btn" on:click={handleOpen} disabled={loading}>
-      {loading ? 'Loading…' : 'Open File'}
-    </button>
-    {#if prefs.recentFiles.length > 0}
-      <div class="recent-wrap">
-        <button
-          class="cursor-btn"
-          on:click={() => (showRecent = !showRecent)}
-          title="Recent files"
-        >
-          Recent ▾
-        </button>
-        {#if showRecent}
-          <!-- svelte-ignore a11y-no-static-element-interactions -->
-          <div class="recent-dropdown" on:mouseleave={() => (showRecent = false)}>
-            {#each prefs.recentFiles as rpath}
-              <button
-                class="recent-item"
-                title={rpath}
-                on:click={() => handleOpenRecent(rpath)}
-              >
-                {rpath.split(/[\\/]/).pop() ?? rpath}
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    {/if}
-    <button
-      class="cursor-btn"
-      on:click={addGraph}
-      title="Add a new graph below"
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      Add Graph
-    </button>
-    {#if canUseLoadedData}
-      <button
-        class="cursor-btn"
-        on:click={handleUseLoadedData}
-        title="Load the cached dataset into this graph so you can pick its own series"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Use loaded data
+  <!-- Instrument header bar -->
+  <header class="toolbar">
+    <!-- Wordmark -->
+    <div class="brand" title="OxidePlot">
+      <svg class="brand-mark" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="21" height="21" rx="5.5" stroke="var(--border-mid)" stroke-width="1.5"/>
+        <path d="M4 16 L8.5 16 L11.5 7 L14.5 18.5 L20 11" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="brand-name">Oxide<span class="brand-accent">Plot</span></span>
+    </div>
+
+    <div class="tsep"></div>
+
+    <!-- File -->
+    <div class="tgroup">
+      <button class="tbtn primary" on:click={handleOpen} disabled={loading}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        {loading ? 'Loading…' : 'Open'}
       </button>
+      {#if prefs.recentFiles.length > 0}
+        <div class="recent-wrap">
+          <button class="tbtn" on:click={() => (showRecent = !showRecent)} title="Recent files">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 16 14"/></svg>
+            Recent
+            <svg class="caret" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          {#if showRecent}
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div class="recent-dropdown" on:mouseleave={() => (showRecent = false)}>
+              {#each prefs.recentFiles as rpath}
+                <button class="recent-item" title={rpath} on:click={() => handleOpenRecent(rpath)}>
+                  {rpath.split(/[\\/]/).pop() ?? rpath}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
+      {#if canUseLoadedData}
+        <button class="tbtn" on:click={handleUseLoadedData} title="Load the cached dataset into this graph so you can pick its own series">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Use Data
+        </button>
+      {/if}
+    </div>
+
+    <div class="tsep"></div>
+
+    <!-- Graphs -->
+    <div class="tgroup">
+      <button class="tbtn" on:click={addGraph} title="Add a new graph below">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add Graph
+      </button>
+    </div>
+
+    <div class="tsep"></div>
+
+    <!-- View -->
+    <div class="tgroup">
+      <button class="tbtn" disabled={!hasData} on:click={handleFit} title="Re-fit view to all data (same as double-click)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>
+        Fit
+      </button>
+      <button class="tbtn" class:active={syncX} on:click={toggleSyncX} title={syncX ? 'Sync X ON — all graphs share the same X-range (click to disable)' : 'Sync X OFF — pan/zoom one graph to sync all others'}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        Sync X
+      </button>
+      <button class="tbtn" class:active={cursorMode} on:click={toggleCursorMode} title={cursorMode ? 'Cursor mode ON — click to place cursors (toggle off to clear)' : 'Cursor mode OFF'}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+        Cursors
+      </button>
+      <button class="tbtn drawmode" disabled={!hasData} on:click={cycleDrawMode} title="Cycle draw mode: Lines → Step → Points">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 12 7 12 10 5 14 19 17 12 21 12"/></svg>
+        {DRAW_MODE_LABELS[drawMode]}
+      </button>
+      <button class="tbtn" class:active={viewMode === 'table'} disabled={!hasData} on:click={toggleViewMode} title={viewMode === 'table' ? 'Switch to plot view' : 'Switch to table view'}>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+        Table
+      </button>
+    </div>
+
+    <div class="tsep"></div>
+
+    <!-- Output -->
+    <div class="tgroup">
+      <button class="tbtn" class:active={showSettings} on:click={toggleSettings} title="Toggle settings panel">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="2" y1="14" x2="6" y2="14"/><line x1="10" y1="8" x2="14" y2="8"/><line x1="18" y1="16" x2="22" y2="16"/></svg>
+        Settings
+      </button>
+      <button class="tbtn" disabled={!hasData} on:click={handleExportCsv} title="Export all series to CSV">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+        CSV
+      </button>
+      <button class="tbtn" disabled={!hasData} on:click={handleExportPng} title="Save plot as PNG (note: WebGPU canvas — verify image is not blank)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        PNG
+      </button>
+      <button class="tbtn" disabled={!hasData} on:click={handleCopy} title="Copy plot PNG to clipboard">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy
+      </button>
+    </div>
+
+    {#if filePath && !fileMeta}
+      <span class="file-label" title={filePath}>{filePath.split(/[\\/]/).pop()}</span>
     {/if}
-    <button
-      class="cursor-btn"
-      disabled={!hasData}
-      on:click={handleFit}
-      title="Re-fit view to all data (same as double-click)"
-    >
-      Fit
-    </button>
-    <button
-      class="cursor-btn"
-      class:active={syncX}
-      on:click={toggleSyncX}
-      title={syncX ? 'Sync X ON — all graphs share the same X-range (click to disable)' : 'Sync X OFF — pan/zoom one graph to sync all others'}
-    >
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-      Sync X
-    </button>
-    <button
-      class="cursor-btn"
-      class:active={cursorMode}
-      on:click={toggleCursorMode}
-      title={cursorMode ? 'Cursor mode ON — click to place cursors (toggle off to clear)' : 'Cursor mode OFF'}
-    >
-      Cursors
-    </button>
-    <button
-      class="draw-mode-btn"
-      disabled={!hasData}
-      on:click={cycleDrawMode}
-      title="Cycle draw mode: Lines → Step → Points"
-    >
-      {DRAW_MODE_LABELS[drawMode]}
-    </button>
-    <button
-      class="cursor-btn"
-      class:active={viewMode === 'table'}
-      disabled={!hasData}
-      on:click={toggleViewMode}
-      title={viewMode === 'table' ? 'Switch to plot view' : 'Switch to table view'}
-    >
-      Table
-    </button>
-    <button
-      class="cursor-btn"
-      class:active={showSettings}
-      on:click={toggleSettings}
-      title="Toggle settings panel"
-    >
-      Settings
-    </button>
-    <button
-      class="cursor-btn"
-      disabled={!hasData}
-      on:click={handleExportCsv}
-      title="Export all series to CSV"
-    >
-      Export CSV
-    </button>
-    <button
-      class="cursor-btn"
-      disabled={!hasData}
-      on:click={handleExportPng}
-      title="Save plot as PNG (note: WebGPU canvas — verify image is not blank)"
-    >
-      Export PNG
-    </button>
-    <button
-      class="cursor-btn"
-      disabled={!hasData}
-      on:click={handleCopy}
-      title="Copy plot PNG to clipboard"
-    >
-      Copy
-    </button>
-    <!-- Theme toggle -->
-    <button
-      class="theme-btn"
-      on:click={toggleTheme}
-      title={prefs.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-      aria-label={prefs.theme === 'dark' ? 'Light mode' : 'Dark mode'}
-    >
+    {#if error}
+      <span class="error-msg" title={error}>{error}</span>
+    {/if}
+
+    <div class="tspacer"></div>
+
+    <!-- Theme -->
+    <button class="tbtn icon-only theme" on:click={toggleTheme} title={prefs.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} aria-label={prefs.theme === 'dark' ? 'Light mode' : 'Dark mode'}>
       {#if prefs.theme === 'dark'}
-        <!-- sun icon: click to switch to light -->
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
       {:else}
-        <!-- moon icon: click to switch to dark -->
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
       {/if}
     </button>
-    {#if filePath && !fileMeta}
-      <span class="file-label" title={filePath}>
-        {filePath.split(/[\\/]/).pop()}
-      </span>
-    {/if}
-    {#if error}
-      <span class="error-msg">{error}</span>
-    {/if}
-  </div>
+  </header>
 
   <!-- Workspace: a vertical stack of graphs plus the focused graph's overlay
        panels. The relative wrapper gives the absolutely-positioned
@@ -649,122 +625,136 @@
   /* ── CSS custom properties — dark theme (default) ── */
   :global(:root),
   :global(:root[data-theme="dark"]) {
-    --bg: #1a1a1f;
-    --panel-bg: #16161e;
-    --panel-bg-alpha: rgba(20, 20, 30, 0.88);
-    --toolbar-bg: #111118;
-    --text: #e0e0ee;
-    --text-muted: #8888aa;
-    --text-dim: #b0b0cc;
-    --border: #2a2a3a;
-    --border-mid: #3a3a50;
-    --btn-bg: #2a2a3a;
-    --btn-border: #44445a;
-    --btn-hover-bg: #3a3a52;
-    --btn-hover-text: #e0e0ff;
-    --btn-active-bg: #1a4a60;
-    --btn-active-text: #00e5ff;
-    --btn-active-border: #00b8d9;
-    --accent: #3060c0;
-    --recent-bg: #1a1a28;
-    --recent-item-hover: #2a2a42;
-    --axis-line-major: rgba(220, 220, 240, 0.85);
-    --axis-line-minor: rgba(180, 180, 200, 0.5);
-    --axis-text: rgba(200, 200, 220, 0.9);
-    --axis-text-stroke: rgba(10, 10, 18, 0.7);
-    --grid-line: rgba(255, 255, 255, 0.06);
-    --cursor-dot-stroke: rgba(10, 10, 18, 0.7);
-    --cursor-readout-bg: rgba(10, 10, 20, 0.82);
-    --cursor-readout-border: rgba(180, 180, 220, 0.25);
-    --cursor-readout-text: #d0d0ee;
-    --cursor-readout-vals: #c0c0dd;
-    --cursor-divider: rgba(180, 180, 220, 0.2);
-    --cursor-delta-label: #aaaacc;
-    --cursor-delta-vals: #e0e0ff;
-    --series-row-hover: rgba(60, 60, 90, 0.4);
-    --series-ctrl-btn: #8888aa;
-    --series-ctrl-hover-bg: rgba(80, 80, 120, 0.5);
-    --series-name-text: #d0d0ee;
-    --swatch-border: rgba(255, 255, 255, 0.15);
-    --settings-header: #a0a0cc;
-    --settings-label: #a8a8c4;
-    --settings-val: #7878a0;
-    --dialog-bg: #1e1e28;
-    --dialog-overlay: rgba(0, 0, 0, 0.7);
-    --dialog-text: #e0e0ee;
+    --bg: #0e0f13;
+    --panel-bg: #15171c;
+    --panel-bg-alpha: rgba(17, 19, 24, 0.86);
+    --toolbar-bg: #0a0b0e;
+    --toolbar-bg-2: #14161c;
+    --text: #e6e8ec;
+    --text-muted: #696f7a;
+    --text-dim: #aab0b9;
+    --border: #1f222a;
+    --border-mid: #2c303a;
+    --btn-bg: #181b21;
+    --btn-border: #272b34;
+    --btn-hover-bg: #21252e;
+    --btn-hover-text: #f3f5f8;
+    --btn-active-bg: rgba(255, 106, 43, 0.14);
+    --btn-active-text: #ff8f54;
+    --btn-active-border: rgba(255, 106, 43, 0.5);
+    --accent: #ff6a2b;
+    --accent-bright: #ff8f54;
+    --accent-dim: rgba(255, 106, 43, 0.45);
+    --accent-bg: rgba(255, 106, 43, 0.12);
+    --radius: 7px;
+    --radius-sm: 5px;
+    --shadow-panel: 0 10px 30px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    --recent-bg: #14161c;
+    --recent-item-hover: #21252e;
+    --axis-line-major: rgba(225, 228, 234, 0.85);
+    --axis-line-minor: rgba(170, 176, 188, 0.45);
+    --axis-text: rgba(205, 210, 220, 0.92);
+    --axis-text-stroke: rgba(10, 11, 14, 0.75);
+    --grid-line: rgba(255, 255, 255, 0.05);
+    --cursor-dot-stroke: rgba(10, 11, 14, 0.75);
+    --cursor-readout-bg: rgba(12, 13, 17, 0.85);
+    --cursor-readout-border: rgba(255, 106, 43, 0.3);
+    --cursor-readout-text: #d4d8df;
+    --cursor-readout-vals: #c2c7d0;
+    --cursor-divider: rgba(170, 176, 188, 0.18);
+    --cursor-delta-label: #9aa0ab;
+    --cursor-delta-vals: #ffb083;
+    --series-row-hover: rgba(255, 255, 255, 0.04);
+    --series-ctrl-btn: #7a808b;
+    --series-ctrl-hover-bg: rgba(255, 106, 43, 0.16);
+    --series-name-text: #d4d8df;
+    --swatch-border: rgba(255, 255, 255, 0.18);
+    --settings-header: #ff8f54;
+    --settings-label: #aab0b9;
+    --settings-val: #7a808b;
+    --dialog-bg: #15171c;
+    --dialog-overlay: rgba(6, 7, 9, 0.72);
+    --dialog-text: #e6e8ec;
     --dialog-h2: #ffffff;
-    --dialog-subtitle: #7a7a9a;
-    --dialog-section-title: #8888aa;
-    --col-row-hover: #2a2a3a;
-    --col-row-selected: #252540;
-    --col-kind-numeric-bg: #1a3a1a;
-    --col-kind-numeric-text: #60dd60;
-    --col-kind-datetime-bg: #1a2a3a;
-    --col-kind-datetime-text: #60aadd;
-    --col-kind-text-bg: #3a2a1a;
-    --col-kind-text-text: #ddaa60;
-    --btn-cancel-bg: #2e2e44;
-    --btn-cancel-text: #aaaacc;
+    --dialog-subtitle: #767c87;
+    --dialog-section-title: #ff8f54;
+    --col-row-hover: #1f232b;
+    --col-row-selected: rgba(255, 106, 43, 0.12);
+    --col-kind-numeric-bg: rgba(96, 221, 96, 0.12);
+    --col-kind-numeric-text: #74d674;
+    --col-kind-datetime-bg: rgba(96, 170, 221, 0.12);
+    --col-kind-datetime-text: #6cb6e6;
+    --col-kind-text-bg: rgba(255, 106, 43, 0.14);
+    --col-kind-text-text: #ff9a5e;
+    --btn-cancel-bg: #21252e;
+    --btn-cancel-text: #aab0b9;
   }
 
   /* ── CSS custom properties — light theme ── */
   :global(:root[data-theme="light"]) {
-    --bg: #f5f5f7;
+    --bg: #f4f4f1;
     --panel-bg: #ffffff;
     --panel-bg-alpha: rgba(255, 255, 255, 0.92);
-    --toolbar-bg: #e8e8ed;
-    --text: #1a1a1f;
-    --text-muted: #666688;
-    --text-dim: #444455;
-    --border: #d0d0d8;
-    --border-mid: #b0b0bc;
-    --btn-bg: #e0e0e8;
-    --btn-border: #b8b8c8;
-    --btn-hover-bg: #d0d0dc;
-    --btn-hover-text: #111118;
-    --btn-active-bg: #cce4f0;
-    --btn-active-text: #006688;
-    --btn-active-border: #0088bb;
-    --accent: #3060c0;
-    --recent-bg: #f0f0f5;
-    --recent-item-hover: #e0e0ea;
-    --axis-line-major: rgba(40, 40, 60, 0.8);
-    --axis-line-minor: rgba(60, 60, 80, 0.4);
-    --axis-text: rgba(20, 20, 40, 0.9);
-    --axis-text-stroke: rgba(245, 245, 248, 0.85);
-    --grid-line: rgba(0, 0, 0, 0.07);
-    --cursor-dot-stroke: rgba(245, 245, 248, 0.85);
-    --cursor-readout-bg: rgba(255, 255, 255, 0.90);
-    --cursor-readout-border: rgba(80, 80, 100, 0.25);
-    --cursor-readout-text: #222230;
-    --cursor-readout-vals: #333344;
-    --cursor-divider: rgba(80, 80, 100, 0.2);
-    --cursor-delta-label: #555566;
-    --cursor-delta-vals: #111120;
-    --series-row-hover: rgba(160, 160, 200, 0.2);
-    --series-ctrl-btn: #555566;
-    --series-ctrl-hover-bg: rgba(100, 100, 160, 0.15);
-    --series-name-text: #222230;
+    --toolbar-bg: #eceae4;
+    --toolbar-bg-2: #f4f4f1;
+    --text: #1b1d22;
+    --text-muted: #8a8f98;
+    --text-dim: #44484f;
+    --border: #dddbd3;
+    --border-mid: #c6c4bc;
+    --btn-bg: #ffffff;
+    --btn-border: #d3d1c9;
+    --btn-hover-bg: #f0efe9;
+    --btn-hover-text: #14161a;
+    --btn-active-bg: rgba(214, 78, 22, 0.12);
+    --btn-active-text: #c2470f;
+    --btn-active-border: rgba(214, 78, 22, 0.5);
+    --accent: #e25416;
+    --accent-bright: #c2470f;
+    --accent-dim: rgba(226, 84, 22, 0.4);
+    --accent-bg: rgba(226, 84, 22, 0.1);
+    --radius: 7px;
+    --radius-sm: 5px;
+    --shadow-panel: 0 10px 30px rgba(40, 30, 20, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    --recent-bg: #ffffff;
+    --recent-item-hover: #f0efe9;
+    --axis-line-major: rgba(40, 42, 50, 0.8);
+    --axis-line-minor: rgba(60, 62, 70, 0.4);
+    --axis-text: rgba(25, 27, 34, 0.9);
+    --axis-text-stroke: rgba(244, 244, 241, 0.85);
+    --grid-line: rgba(0, 0, 0, 0.06);
+    --cursor-dot-stroke: rgba(244, 244, 241, 0.85);
+    --cursor-readout-bg: rgba(255, 255, 255, 0.92);
+    --cursor-readout-border: rgba(226, 84, 22, 0.35);
+    --cursor-readout-text: #22242c;
+    --cursor-readout-vals: #33363f;
+    --cursor-divider: rgba(80, 82, 90, 0.18);
+    --cursor-delta-label: #5a5e66;
+    --cursor-delta-vals: #b8430d;
+    --series-row-hover: rgba(0, 0, 0, 0.04);
+    --series-ctrl-btn: #6a6e76;
+    --series-ctrl-hover-bg: rgba(226, 84, 22, 0.12);
+    --series-name-text: #22242c;
     --swatch-border: rgba(0, 0, 0, 0.15);
-    --settings-header: #444460;
-    --settings-label: #333348;
-    --settings-val: #666680;
+    --settings-header: #c2470f;
+    --settings-label: #33363f;
+    --settings-val: #6a6e76;
     --dialog-bg: #ffffff;
-    --dialog-overlay: rgba(0, 0, 0, 0.45);
-    --dialog-text: #1a1a2f;
-    --dialog-h2: #000010;
-    --dialog-subtitle: #555568;
-    --dialog-section-title: #666680;
-    --col-row-hover: #ebebf0;
-    --col-row-selected: #dde8f5;
-    --col-kind-numeric-bg: #d4f0d4;
+    --dialog-overlay: rgba(30, 25, 20, 0.42);
+    --dialog-text: #1b1d22;
+    --dialog-h2: #0a0b0d;
+    --dialog-subtitle: #6a6e76;
+    --dialog-section-title: #c2470f;
+    --col-row-hover: #f0efe9;
+    --col-row-selected: rgba(226, 84, 22, 0.1);
+    --col-kind-numeric-bg: rgba(26, 106, 26, 0.12);
     --col-kind-numeric-text: #1a6a1a;
-    --col-kind-datetime-bg: #d4e4f0;
+    --col-kind-datetime-bg: rgba(26, 74, 122, 0.12);
     --col-kind-datetime-text: #1a4a7a;
-    --col-kind-text-bg: #f0e8d4;
-    --col-kind-text-text: #7a4a1a;
-    --btn-cancel-bg: #e0e0ea;
-    --btn-cancel-text: #444460;
+    --col-kind-text-bg: rgba(226, 84, 22, 0.14);
+    --col-kind-text-text: #b8430d;
+    --btn-cancel-bg: #eceae4;
+    --btn-cancel-text: #44484f;
   }
 
   :global(body) {
@@ -772,7 +762,7 @@
     background: var(--bg);
     overflow: hidden;
     color: var(--text);
-    font-family: sans-serif;
+    font-family: var(--font-ui);
   }
 
   main {
@@ -782,16 +772,60 @@
     flex-direction: column;
   }
 
+  /* ── Instrument header bar ── */
   .toolbar {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
-    background: var(--toolbar-bg);
-    border-bottom: 1px solid var(--border);
+    gap: 5px;
+    padding: 0 12px;
+    height: 50px;
     flex-shrink: 0;
-    height: 42px;
     box-sizing: border-box;
+    background: linear-gradient(180deg, var(--toolbar-bg-2), var(--toolbar-bg));
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  }
+
+  /* Wordmark */
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding-right: 2px;
+    user-select: none;
+  }
+  .brand-mark {
+    display: block;
+    filter: drop-shadow(0 0 7px var(--accent-dim));
+  }
+  .brand-name {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: 1.02rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text);
+    line-height: 1;
+  }
+  .brand-accent {
+    color: var(--accent);
+  }
+
+  /* Button groups + separators */
+  .tgroup {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .tsep {
+    width: 1px;
+    height: 22px;
+    background: var(--border);
+    margin: 0 5px;
+    flex-shrink: 0;
+  }
+  .tspacer {
+    flex: 1 1 auto;
   }
 
   /* Workspace holds the graph stack + its overlay panels; relative so the
@@ -848,149 +882,150 @@
     border-color: var(--border-mid);
   }
 
-  .open-btn {
-    padding: 5px 16px;
-    background: var(--accent);
-    color: #fff;
-    border: none;
-    border-radius: 5px;
+  /* ── Tool button ── */
+  .tbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    height: 30px;
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
     cursor: pointer;
-    font-size: 0.85rem;
-    font-weight: 600;
-    transition: opacity 0.15s;
+    font-family: var(--font-ui);
+    font-size: 0.71rem;
+    font-weight: 500;
+    letter-spacing: 0.045em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    transition: background 0.13s ease, color 0.13s ease, border-color 0.13s ease;
+  }
+  .tbtn svg {
+    flex-shrink: 0;
+    opacity: 0.9;
+  }
+  .tbtn .caret {
+    opacity: 0.55;
+    margin-left: -3px;
   }
 
-  .open-btn:hover:not(:disabled) {
-    opacity: 0.85;
+  .tbtn:hover:not(:disabled) {
+    background: var(--btn-hover-bg);
+    color: var(--btn-hover-text);
+    border-color: var(--btn-border);
   }
-
-  .open-btn:disabled {
-    opacity: 0.5;
+  .tbtn:active:not(:disabled) {
+    transform: translateY(0.5px);
+  }
+  .tbtn:disabled {
+    opacity: 0.32;
     cursor: not-allowed;
   }
 
-  .cursor-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 14px;
-    background: var(--btn-bg);
-    color: var(--text-dim);
-    border: 1px solid var(--btn-border);
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 0.85rem;
-    font-weight: 600;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-  }
-
-  .cursor-btn:hover {
-    background: var(--btn-hover-bg);
-    color: var(--btn-hover-text);
-  }
-
-  .cursor-btn.active {
+  /* Active (toggled-on) — amber */
+  .tbtn.active {
     background: var(--btn-active-bg);
     color: var(--btn-active-text);
     border-color: var(--btn-active-border);
   }
-
-  .draw-mode-btn {
-    padding: 5px 14px;
-    background: var(--btn-bg);
-    color: var(--text-dim);
-    border: 1px solid var(--btn-border);
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 0.85rem;
-    font-weight: 600;
-    min-width: 60px;
-    transition: background 0.15s, color 0.15s;
+  .tbtn.active svg {
+    opacity: 1;
   }
 
-  .draw-mode-btn:hover:not(:disabled) {
-    background: var(--btn-hover-bg);
-    color: var(--btn-hover-text);
+  /* Primary (Open) — amber-filled */
+  .tbtn.primary {
+    background: var(--accent);
+    color: #160f08;
+    border-color: transparent;
+    font-weight: 700;
+    box-shadow: 0 1px 8px var(--accent-dim);
+  }
+  .tbtn.primary svg {
+    opacity: 1;
+  }
+  .tbtn.primary:hover:not(:disabled) {
+    background: var(--accent-bright);
+    color: #160f08;
+    border-color: transparent;
   }
 
-  .draw-mode-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+  .tbtn.drawmode {
+    min-width: 92px;
   }
 
-  .theme-btn {
-    display: inline-flex;
-    align-items: center;
+  .tbtn.icon-only {
+    padding: 0;
+    width: 30px;
     justify-content: center;
-    padding: 5px 10px;
-    background: var(--btn-bg);
-    border: 1px solid var(--btn-border);
-    border-radius: 5px;
-    cursor: pointer;
-    color: var(--text);
-    transition: background 0.15s;
-    margin-left: auto;
+  }
+  .tbtn.theme:hover {
+    color: var(--accent);
   }
 
-  .theme-btn:hover {
-    background: var(--btn-hover-bg);
-  }
-
+  /* Status text */
   .file-label {
-    font-size: 0.8rem;
+    font-family: var(--font-data);
+    font-size: 0.72rem;
     color: var(--text-muted);
-    max-width: 400px;
+    max-width: 280px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    padding-left: 4px;
   }
 
   .error-msg {
-    font-size: 0.8rem;
-    color: #ff6666;
-    max-width: 600px;
+    font-family: var(--font-data);
+    font-size: 0.72rem;
+    color: var(--accent);
+    max-width: 420px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    padding: 4px 9px;
+    border: 1px solid var(--accent-dim);
+    border-radius: var(--radius-sm);
+    background: var(--accent-bg);
   }
 
+  /* Recent dropdown */
   .recent-wrap {
     position: relative;
   }
 
   .recent-dropdown {
     position: absolute;
-    top: calc(100% + 4px);
+    top: calc(100% + 6px);
     left: 0;
     background: var(--recent-bg);
-    border: 1px solid var(--btn-border);
-    border-radius: 5px;
-    min-width: 220px;
-    max-width: 400px;
+    border: 1px solid var(--border-mid);
+    border-radius: var(--radius);
+    min-width: 240px;
+    max-width: 420px;
     z-index: 100;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-panel);
     overflow: hidden;
+    padding: 4px;
   }
 
   .recent-item {
     display: block;
     width: 100%;
-    padding: 6px 12px;
+    padding: 7px 10px;
     background: transparent;
     color: var(--text-dim);
     border: none;
-    border-bottom: 1px solid var(--border);
+    border-radius: var(--radius-sm);
     text-align: left;
     cursor: pointer;
-    font-size: 0.82rem;
+    font-family: var(--font-data);
+    font-size: 0.76rem;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     transition: background 0.1s, color 0.1s;
-  }
-
-  .recent-item:last-child {
-    border-bottom: none;
   }
 
   .recent-item:hover {

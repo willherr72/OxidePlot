@@ -120,13 +120,17 @@
     min-width: 360px;
     max-width: 520px;
     color: var(--dialog-text);
-    font-family: sans-serif;
-    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.4);
+    font-family: var(--font-ui);
+    box-shadow: var(--shadow-panel);
   }
 
   h2 {
     margin: 0 0 4px;
-    font-size: 1.2rem;
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
     color: var(--dialog-h2);
   }
 
