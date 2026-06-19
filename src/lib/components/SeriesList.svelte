@@ -133,25 +133,35 @@
             <button
               class="ctrl-btn"
               title={s.visible ? 'Hide series' : 'Show series'}
+              aria-label={s.visible ? 'Hide series' : 'Show series'}
               on:click={() => toggleVisible(i, !s.visible)}
-            >{s.visible ? '●' : '○'}</button>
+            >
+              {#if s.visible}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              {:else}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              {/if}
+            </button>
             <button
               class="ctrl-btn"
               title="Move up (lower z-order)"
+              aria-label="Move series up"
               disabled={i === 0}
               on:click={() => moveUp(i)}
-            >↑</button>
+            ><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></button>
             <button
               class="ctrl-btn"
               title="Move down (higher z-order)"
+              aria-label="Move series down"
               disabled={i === series.length - 1}
               on:click={() => moveDown(i)}
-            >↓</button>
+            ><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
             <button
               class="ctrl-btn remove-btn"
               title="Remove series"
+              aria-label="Remove series"
               on:click={() => remove(i)}
-            >×</button>
+            ><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </span>
         </div>
 
@@ -329,15 +339,21 @@
   }
 
   .ctrl-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
     background: transparent;
     border: none;
     color: var(--series-ctrl-btn);
     cursor: pointer;
-    padding: 1px 4px;
-    font-size: 0.8rem;
-    border-radius: 3px;
-    line-height: 1.2;
+    padding: 0;
+    border-radius: var(--radius-sm);
     transition: color 0.12s, background 0.12s;
+  }
+  .ctrl-btn svg {
+    display: block;
   }
 
   .ctrl-btn:hover:not(:disabled) {
@@ -357,10 +373,12 @@
 
   /* fx button */
   .fx-btn {
+    width: auto;
+    padding: 0 7px;
+    font-family: var(--font-data);
     font-size: 0.7rem;
     font-weight: 600;
     letter-spacing: 0.02em;
-    padding: 1px 5px;
     border: 1px solid transparent;
     color: var(--text-muted);
   }
