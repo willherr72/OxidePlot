@@ -12,27 +12,38 @@ stdio, so it plugs into Claude Code, Claude Desktop, or any MCP client.
 | Tool | Purpose |
 |------|---------|
 | `load_csv` | Parse a CSV/Excel file → `dataset_id` + columns (name, kind) + row count |
-| `describe_data` | Per-column statistics (count, min, max, mean, median, std, peak-to-peak) |
+| `describe_data` | Per-column stats + **QC**: n_missing, pct_zero, distinct, longest_constant_run (flag dead/frozen/duplicate channels), plus min/max/mean/median/std for numeric. All columns by default |
 | `query_data` | A page of raw rows, with sort / case-insensitive search / paging |
+| `correlate` | Pearson correlation matrix + pairs sorted by \|r\| (spot a decorrelated/damaged axis) |
+| `derive_column` | Add a computed column: `magnitude` √(x²+…), `add`/`mean`, `subtract`/`ratio`, `scale` |
 | `create_graph` | Pick X + one-or-more Y columns (by name or index) → `graph_id` |
-| `render_graph` | Render the graph to a **PNG image** (with baked axis tick labels) + a text block (ranges, ticks, legend) |
+| `render_graph` | Render to a **PNG** (baked axis tick labels, datetime-aware X) + a text block (ranges, ticks, legend) |
 
-The intended loop: `load_csv → describe_data` / `query_data` (understand) →
-`create_graph → render_graph` (see it) → refine.
+The intended loop: `load_csv → describe_data` / `query_data` / `correlate`
+(understand) → `create_graph → render_graph` (see it) → refine.
 
 ### Render options (`create_graph` / `render_graph`)
 
-- **`layout`** — `overlay` (shared Y, default), `normalized` (each series rescaled
-  0–1 to compare shapes), or `stacked` (one panel per series with its own Y axis,
-  sharing X — best when scales differ, e.g. temperature vs pressure).
-- **`transform`** (+ `transform_window`) — `moving_average` (smoothing),
-  `derivative` (dy/dx), or `integral`, applied to every Y series before plotting.
-- **`draw_mode`** — `lines` (default), `step`, or `points`.
+- **`layout`** — `overlay` (shared Y, default), `normalized` (each series 0–1 to
+  compare shapes), or `stacked` (one panel per series with its own Y, sharing X).
+- **`transform`** (+ `transform_window`) — `moving_average`, `derivative`, `integral`.
+- **`draw_mode`** — `lines` (default), `step`, or `points` (use `points` + a
+  numeric X for an XY scatter).
 
-`render_graph` accepts `layout` / `transform` overrides to re-render the same
-graph differently. Large series are automatically LTTB-downsampled to ~2×width for
-the render (so multi-million-row files render fast) — the text reports
-`points_per_series` and `downsampled_for_render`.
+`render_graph`-only options:
+
+- **`row_start` / `row_end`** or **`x_min` / `x_max`** — window to a row range or
+  X range (e.g. inspect a single-sample glitch); the window isn't downsampled
+  unless still huge, so spikes survive.
+- **`downsample`** — `minmax` (default — keeps each bucket's min & max so a
+  1-sample spike is never dropped; best for QC), `lttb` (smoother), or `none`.
+- **`autoscale`** — `minmax` (default) or `robust` (clip Y to the 1st–99th
+  percentile so a lone outlier doesn't flatten the signal).
+- **`y_scale`** — `linear` (default) or `log`.
+
+A datetime X column is auto-detected and gets real date/time tick labels. Large
+series are downsampled to ~2×width (text reports `points_per_series` /
+`downsampled_for_render`), so multi-million-row files render fast.
 
 ## Build
 
