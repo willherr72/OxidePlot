@@ -357,6 +357,14 @@ struct RenderGraphParams {
     /// "lttb" (smoother, may drop a lone spike), or "none" (plot every point).
     #[serde(default)]
     downsample: Option<String>,
+    /// Y-axis autoscale: "minmax" (default) or "robust" (clip to the 1st–99th
+    /// percentile so a lone extreme outlier doesn't flatten the signal).
+    #[serde(default)]
+    autoscale: Option<String>,
+    /// Y-axis scale: "linear" (default) or "log" (log10; non-positive values are
+    /// dropped). Good for series spanning orders of magnitude.
+    #[serde(default)]
+    y_scale: Option<String>,
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -729,10 +737,12 @@ impl OxidePlot {
             x_min,
             x_max,
             downsample,
+            autoscale,
+            y_scale,
         }): Parameters<RenderGraphParams>,
     ) -> Result<CallToolResult, McpError> {
         // Build per-panel render inputs under the lock; render without holding it.
-        let (panels, panel_w, panel_h, out_h, clear, x_is_time, text) = {
+        let (panels, panel_w, panel_h, out_h, clear, x_is_time, y_is_log, text) = {
             let s = self.session.lock().await;
             let g = s.graphs.get(&graph_id).ok_or_else(|| {
                 McpError::invalid_params(format!("unknown graph_id '{graph_id}'"), None)
@@ -768,6 +778,8 @@ impl OxidePlot {
             // renders fast — this is the win for files too big to read directly).
             let render_cap = (w as usize) * 2;
             let ds_mode = downsample.as_deref().unwrap_or("minmax");
+            let robust = autoscale.as_deref() == Some("robust");
+            let y_is_log = y_scale.as_deref() == Some("log");
             let mut sdata: Vec<PanelSeries> = Vec::new();
             let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
             let mut max_raw_points = 0usize;
@@ -796,6 +808,25 @@ impl OxidePlot {
                     xmax = xmax.max(x);
                     ymn = ymn.min(y);
                     ymx = ymx.max(y);
+                }
+
+                // Log-Y: keep positive values, map to log10, and re-fit the y-range.
+                if y_is_log {
+                    let mut lx = Vec::with_capacity(fx.len());
+                    let mut ly = Vec::with_capacity(fy.len());
+                    ymn = f64::INFINITY;
+                    ymx = f64::NEG_INFINITY;
+                    for (&x, &y) in fx.iter().zip(fy.iter()) {
+                        if y > 0.0 {
+                            let l = y.log10();
+                            lx.push(x);
+                            ly.push(l);
+                            ymn = ymn.min(l);
+                            ymx = ymx.max(l);
+                        }
+                    }
+                    fx = lx;
+                    fy = ly;
                 }
                 max_raw_points = max_raw_points.max(fx.len());
 
@@ -853,10 +884,13 @@ impl OxidePlot {
                         panel_h,
                         g.draw_mode,
                         false,
+                        robust,
                     ));
                 }
             } else {
-                panels.push(build_panel(&sdata, x_view, w, panel_h, g.draw_mode, normalize));
+                panels.push(build_panel(
+                    &sdata, x_view, w, panel_h, g.draw_mode, normalize, robust,
+                ));
             }
             let out_h = panel_h * n;
 
@@ -906,13 +940,15 @@ impl OxidePlot {
                 "points_per_series": max_raw_points,
                 "downsampled_for_render": any_downsampled,
                 "downsample": ds_mode,
+                "autoscale": if robust { "robust" } else { "minmax" },
+                "y_scale": if y_is_log { "log" } else { "linear" },
                 "window": { "row_start": row_start, "row_end": row_end, "x_min": x_min, "x_max": x_max },
                 "note": note,
             })
             .to_string();
 
             let clear = [0.055_f64, 0.059, 0.075, 1.0];
-            (panels, w, panel_h, out_h, clear, x_is_time, text)
+            (panels, w, panel_h, out_h, clear, x_is_time, y_is_log, text)
         };
 
         // Render off the lock, on a blocking thread (GPU read-back blocks).
@@ -990,7 +1026,13 @@ impl OxidePlot {
                             continue;
                         }
                         let py = ((1.0 - (v - vymin) / yspan) * panel_h as f64) as i32 + y_off as i32;
-                        draw_text(&mut buf, panel_w, out_h, &format_tick_value(v), 3, py - 5, lc, 2);
+                        // Log-Y: labels show the real value (10^tick), not the log.
+                        let ylabel = if y_is_log {
+                            format_tick_value(10f64.powf(v))
+                        } else {
+                            format_tick_value(v)
+                        };
+                        draw_text(&mut buf, panel_w, out_h, &ylabel, 3, py - 5, lc, 2);
                     }
                 }
                 buf
@@ -1034,6 +1076,7 @@ fn build_panel(
     h: u32,
     draw_mode: DrawMode,
     normalize: bool,
+    robust: bool,
 ) -> (Vec<SeriesGpuData>, GridGpuData, PlotUniforms) {
     let (y_view, gpu_series): ((f64, f64), Vec<SeriesGpuData>) = if normalize {
         let s = series
@@ -1056,19 +1099,41 @@ fn build_panel(
             .collect();
         ((-0.05, 1.05), s)
     } else {
-        let mut ymn = f64::INFINITY;
-        let mut ymx = f64::NEG_INFINITY;
+        // Min/max over the panel, plus (if robust) a 1st–99th-percentile view
+        // so a lone extreme outlier doesn't flatten the signal.
+        let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
         for sd in series {
             if sd.ymin.is_finite() {
-                ymn = ymn.min(sd.ymin);
+                mn = mn.min(sd.ymin);
             }
             if sd.ymax.is_finite() {
-                ymx = ymx.max(sd.ymax);
+                mx = mx.max(sd.ymax);
             }
         }
-        if !ymn.is_finite() || !ymx.is_finite() {
-            ymn = 0.0;
-            ymx = 1.0;
+        let (mut ymn, mut ymx) = if robust {
+            let mut ys: Vec<f32> = series
+                .iter()
+                .flat_map(|sd| sd.points.iter().map(|p| p[1]))
+                .collect();
+            if ys.len() >= 20 {
+                ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let q = |f: f64| ys[(((ys.len() - 1) as f64) * f).round() as usize] as f64;
+                (q(0.01), q(0.99))
+            } else {
+                (mn, mx)
+            }
+        } else {
+            (mn, mx)
+        };
+        // Degenerate guard: fall back to min/max, then to a unit range.
+        if !ymn.is_finite() || !ymx.is_finite() || ymx <= ymn {
+            if mn.is_finite() && mx.is_finite() && mx > mn {
+                ymn = mn;
+                ymx = mx;
+            } else {
+                ymn = 0.0;
+                ymx = 1.0;
+            }
         }
         let ypad = ((ymx - ymn) * 0.05).max(1e-9);
         let s = series
