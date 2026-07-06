@@ -51,6 +51,23 @@ fn resolve_col(data: &LoadedData, spec: &str) -> Option<usize> {
     data.columns.iter().position(|c| c == spec)
 }
 
+/// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
+fn longest_constant_run(cells: &[String]) -> usize {
+    let mut best = 0usize;
+    let mut cur = 0usize;
+    let mut prev: Option<&str> = None;
+    for c in cells {
+        if prev == Some(c.as_str()) {
+            cur += 1;
+        } else {
+            cur = 1;
+            prev = Some(c.as_str());
+        }
+        best = best.max(cur);
+    }
+    best
+}
+
 /// Min/max envelope decimation: split into `buckets` equal index ranges and keep
 /// each bucket's min-y AND max-y point (in x order). Unlike LTTB this NEVER drops
 /// a 1-sample spike or dropout — the extreme in each bucket is always kept.
@@ -372,7 +389,7 @@ impl OxidePlot {
     }
 
     #[tool(
-        description = "Summary statistics (count, min, max, mean, median, std_dev, peak_to_peak) for a dataset's numeric columns. Pass column names to limit; omit for all numeric columns."
+        description = "Per-column QC + summary stats: n_total, n_missing, pct_zero, distinct, longest_constant_run (flag dead / frozen / duplicate channels), plus min/max/mean/median/std_dev/peak_to_peak for numeric columns. Omit 'columns' to describe ALL columns in one call."
     )]
     async fn describe_data(
         &self,
@@ -392,30 +409,47 @@ impl OxidePlot {
                 .iter()
                 .filter_map(|n| ds.data.columns.iter().position(|c| c == n))
                 .collect(),
-            None => (0..ds.data.columns.len())
-                .filter(|&c| ds.numeric_cols[c])
-                .collect(),
+            None => (0..ds.data.columns.len()).collect(), // all columns → one-call QC overview
         };
 
         let mut out = Vec::new();
         for c in indices {
-            let (vals, _) = column_to_f64(&ds.data.column_data[c]);
-            match SeriesStats::compute(&vals) {
-                Some(st) => out.push(json!({
-                    "column": ds.data.columns[c],
-                    "count": st.count,
-                    "min": st.min,
-                    "max": st.max,
-                    "mean": st.mean,
-                    "median": st.median,
-                    "std_dev": st.std_dev,
-                    "peak_to_peak": st.peak_to_peak,
-                })),
-                None => out.push(json!({
-                    "column": ds.data.columns[c],
-                    "note": "no finite numeric values",
-                })),
+            let cells = &ds.data.column_data[c];
+            let n_total = cells.len();
+            // QC stats (computed for every column, numeric or not).
+            let distinct = cells.iter().collect::<std::collections::HashSet<_>>().len();
+            let const_run = longest_constant_run(cells);
+            let (vals, _) = column_to_f64(cells);
+            let n_finite = vals.iter().filter(|v| v.is_finite()).count();
+            let n_missing = n_total.saturating_sub(n_finite);
+            let n_zero = vals.iter().filter(|v| v.is_finite() && **v == 0.0).count();
+            let pct_zero = if n_finite == 0 {
+                0.0
+            } else {
+                100.0 * n_zero as f64 / n_finite as f64
+            };
+
+            let mut obj = serde_json::Map::new();
+            obj.insert("column".into(), json!(ds.data.columns[c]));
+            obj.insert(
+                "kind".into(),
+                json!(if ds.numeric_cols[c] { "numeric" } else { "text" }),
+            );
+            obj.insert("n_total".into(), json!(n_total));
+            obj.insert("n_missing".into(), json!(n_missing));
+            obj.insert("pct_zero".into(), json!((pct_zero * 10.0).round() / 10.0));
+            obj.insert("distinct".into(), json!(distinct));
+            obj.insert("longest_constant_run".into(), json!(const_run));
+            // Numeric summary (only for columns with finite values).
+            if let Some(st) = SeriesStats::compute(&vals) {
+                obj.insert("min".into(), json!(st.min));
+                obj.insert("max".into(), json!(st.max));
+                obj.insert("mean".into(), json!(st.mean));
+                obj.insert("median".into(), json!(st.median));
+                obj.insert("std_dev".into(), json!(st.std_dev));
+                obj.insert("peak_to_peak".into(), json!(st.peak_to_peak));
             }
+            out.push(serde_json::Value::Object(obj));
         }
         Ok(Self::text_result(json!({ "stats": out })))
     }
