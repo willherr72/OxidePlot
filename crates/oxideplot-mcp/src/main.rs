@@ -375,6 +375,24 @@ struct CorrelateParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct HealthParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SegmentParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// Columns (names or indices) to segment. Omit for all numeric columns.
+    #[serde(default)]
+    columns: Option<Vec<String>>,
+    /// Number of equal row-windows to split into (default 10).
+    #[serde(default)]
+    segments: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct DeriveParams {
     /// Dataset id returned by load_csv.
     dataset_id: String,
@@ -736,6 +754,230 @@ impl OxidePlot {
             out["matrix"] = json!(matrix);
         }
         Ok(Self::text_result(out))
+    }
+
+    #[tool(
+        description = "Per-segment statistics: split the dataset into N equal row-windows and report mean/std/min/max per column per segment, so a mid-run level shift, drift, or a channel railing out becomes visible (whole-dataset stats hide these). Omit 'columns' for all numeric."
+    )]
+    async fn segment_stats(
+        &self,
+        Parameters(SegmentParams {
+            dataset_id,
+            columns,
+            segments,
+        }): Parameters<SegmentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let s = self.session.lock().await;
+        let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+            McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+        })?;
+        let n_seg = segments.unwrap_or(10).clamp(2, 500);
+        let idxs: Vec<usize> = match columns {
+            Some(names) => names
+                .iter()
+                .filter_map(|n| resolve_col(&ds.data, n))
+                .filter(|&c| ds.numeric_cols[c])
+                .collect(),
+            None => (0..ds.data.columns.len())
+                .filter(|&c| ds.numeric_cols[c])
+                .collect(),
+        };
+        let n_rows = ds.data.row_count;
+        let r4 = |x: f64| (x * 10000.0).round() / 10000.0;
+
+        let mut out = Vec::new();
+        for &c in &idxs {
+            let (vals, _) = column_to_f64(&ds.data.column_data[c]);
+            let mut segs = Vec::new();
+            for seg in 0..n_seg {
+                let lo = seg * n_rows / n_seg;
+                let hi = ((seg + 1) * n_rows / n_seg).min(n_rows);
+                let slice: Vec<f64> = vals
+                    .get(lo..hi)
+                    .unwrap_or(&[])
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .collect();
+                match SeriesStats::compute(&slice) {
+                    Some(st) => segs.push(json!({
+                        "rows": [lo, hi],
+                        "mean": r4(st.mean),
+                        "std": r4(st.std_dev),
+                        "min": r4(st.min),
+                        "max": r4(st.max),
+                    })),
+                    None => segs.push(json!({ "rows": [lo, hi], "note": "no finite values" })),
+                }
+            }
+            out.push(json!({ "column": ds.data.columns[c], "segments": segs }));
+        }
+        Ok(Self::text_result(json!({
+            "n_segments": n_seg,
+            "n_rows": n_rows,
+            "columns": out,
+        })))
+    }
+
+    #[tool(
+        description = "One-call QC health scan of a dataset: returns a severity-ranked list of issues — dead/frozen channels, single-sample glitches (robust z-score), mid-run level shifts (changepoints), time-index gaps, and missing-data clusters. The report a field engineer runs first."
+    )]
+    async fn health_check(
+        &self,
+        Parameters(HealthParams { dataset_id }): Parameters<HealthParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let s = self.session.lock().await;
+        let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+            McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+        })?;
+        let n_rows = ds.data.row_count;
+        // (severity_rank, finding); 0 = high, 1 = medium, 2 = low.
+        let mut findings: Vec<(u8, serde_json::Value)> = Vec::new();
+
+        // Dataset-level: time-index gaps (first datetime column).
+        for c in 0..ds.data.columns.len() {
+            if let Some((ts, frac)) = column_to_timestamps(&ds.data.column_data[c]) {
+                if frac >= 0.5 && ts.len() >= 3 {
+                    let dts: Vec<f64> = ts.windows(2).map(|w| w[1] - w[0]).collect();
+                    let mut sorted: Vec<f64> =
+                        dts.iter().copied().filter(|d| d.is_finite() && *d > 0.0).collect();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    if !sorted.is_empty() {
+                        let median = sorted[sorted.len() / 2];
+                        let (mut n_gaps, mut lost, mut first) = (0usize, 0.0, None);
+                        for (i, &d) in dts.iter().enumerate() {
+                            if d.is_finite() && d > median * 3.0 && d > median + 1e-6 {
+                                n_gaps += 1;
+                                lost += d - median;
+                                if first.is_none() {
+                                    first = Some(i);
+                                }
+                            }
+                        }
+                        if n_gaps > 0 {
+                            findings.push((1, json!({
+                                "severity": "medium", "kind": "time_gaps",
+                                "column": ds.data.columns[c],
+                                "detail": format!("{n_gaps} gap(s), ~{:.0}s of samples missing", lost),
+                                "first_gap_row": first,
+                            })));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        // Per numeric column checks.
+        for c in 0..ds.data.columns.len() {
+            if !ds.numeric_cols[c] {
+                continue;
+            }
+            let name = &ds.data.columns[c];
+            let cells = &ds.data.column_data[c];
+            // Skip a datetime index column (it's the time axis, not a data channel).
+            if column_to_timestamps(cells)
+                .map(|(_, f)| f >= 0.5)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let (vals, _) = column_to_f64(cells);
+            let finite: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+            let n_finite = finite.len();
+            let n_missing = n_rows.saturating_sub(n_finite);
+            let distinct = cells.iter().collect::<std::collections::HashSet<_>>().len();
+            let const_run = longest_constant_run(cells);
+
+            // Dead / constant.
+            if n_finite > 0 && distinct <= 1 {
+                findings.push((0, json!({ "severity": "high", "kind": "dead", "column": name, "detail": "single distinct value (dead/constant)" })));
+            } else if n_finite > 0 {
+                let n_zero = finite.iter().filter(|&&v| v == 0.0).count();
+                if n_zero as f64 / n_finite as f64 > 0.95 {
+                    findings.push((0, json!({ "severity": "high", "kind": "dead", "column": name, "detail": format!("{:.0}% zero", 100.0 * n_zero as f64 / n_finite as f64) })));
+                }
+            }
+            // Frozen (long constant run but not fully dead).
+            if distinct > 1 && (const_run as f64) > (n_rows as f64 * 0.05).max(30.0) {
+                findings.push((1, json!({ "severity": "medium", "kind": "frozen", "column": name, "detail": format!("stuck for {const_run} consecutive rows") })));
+            }
+            // Missing.
+            if n_rows > 0 && n_missing as f64 / n_rows as f64 > 0.05 {
+                findings.push((1, json!({ "severity": "medium", "kind": "missing", "column": name, "detail": format!("{:.1}% missing ({n_missing} rows)", 100.0 * n_missing as f64 / n_rows as f64) })));
+            }
+            // Single-sample glitches via robust z-score (median / MAD).
+            if n_finite >= 20 {
+                let mut sf = finite.clone();
+                sf.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let median = sf[sf.len() / 2];
+                let mut devs: Vec<f64> = sf.iter().map(|v| (v - median).abs()).collect();
+                devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let mad = devs[devs.len() / 2];
+                if mad > 0.0 {
+                    let mut rows: Vec<usize> = Vec::new();
+                    for (r, &v) in vals.iter().enumerate() {
+                        if v.is_finite() && (v - median).abs() / (1.4826 * mad) > 10.0 {
+                            rows.push(r);
+                        }
+                    }
+                    if !rows.is_empty() {
+                        let sample: Vec<usize> = rows.iter().take(10).copied().collect();
+                        findings.push((0, json!({ "severity": "high", "kind": "glitch", "column": name, "detail": format!("{} sample(s) with robust z>10", rows.len()), "rows_sample": sample })));
+                    }
+                }
+            }
+            // Changepoint: an adjacent-segment mean jump large vs the LOCAL noise
+            // (median within-segment std) — so a shift that inflates the overall
+            // std (and would mask itself) still flags.
+            if n_rows >= 40 {
+                let n_seg = 10usize;
+                let mut means: Vec<Option<f64>> = Vec::new();
+                let mut stds: Vec<f64> = Vec::new();
+                let mut lows: Vec<usize> = Vec::new();
+                for seg in 0..n_seg {
+                    let lo = seg * n_rows / n_seg;
+                    let hi = ((seg + 1) * n_rows / n_seg).min(n_rows);
+                    let sl: Vec<f64> = vals
+                        .get(lo..hi)
+                        .unwrap_or(&[])
+                        .iter()
+                        .copied()
+                        .filter(|v| v.is_finite())
+                        .collect();
+                    let st = SeriesStats::compute(&sl);
+                    means.push(st.as_ref().map(|s| s.mean));
+                    if let Some(s2) = &st {
+                        stds.push(s2.std_dev);
+                    }
+                    lows.push(lo);
+                }
+                stds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let scale = if stds.is_empty() {
+                    0.0
+                } else {
+                    stds[stds.len() / 2]
+                }
+                .max(1e-9);
+                for seg in 1..n_seg {
+                    if let (Some(a), Some(b)) = (means[seg - 1], means[seg]) {
+                        if (b - a).abs() > 5.0 * scale {
+                            findings.push((1, json!({ "severity": "medium", "kind": "changepoint", "column": name, "detail": format!("mean shifts {:.3} at ~row {}", b - a, lows[seg]), "row": lows[seg] })));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        findings.sort_by_key(|f| f.0);
+        let list: Vec<_> = findings.into_iter().map(|f| f.1).collect();
+        Ok(Self::text_result(json!({
+            "dataset_id": dataset_id,
+            "n_rows": n_rows,
+            "n_findings": list.len(),
+            "findings": list,
+        })))
     }
 
     #[tool(
