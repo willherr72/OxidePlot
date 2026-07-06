@@ -333,9 +333,12 @@
     min-width: max-content;
   }
 
-  /* Header cells */
+  /* Header cells — fixed width so header / filter / data columns all align. */
   .th {
-    min-width: 120px;
+    flex: 0 0 150px;
+    width: 150px;
+    min-width: 150px;
+    max-width: 150px;
     padding: 4px 8px;
     border-right: 1px solid var(--border);
     display: flex;
@@ -427,9 +430,12 @@
     background: var(--col-row-hover);
   }
 
-  /* Data cells */
+  /* Data cells — same fixed width as headers so columns line up exactly. */
   .td {
-    min-width: 120px;
+    flex: 0 0 150px;
+    width: 150px;
+    min-width: 150px;
+    max-width: 150px;
     height: 100%;
     padding: 0 8px;
     border-right: 1px solid var(--border);
@@ -453,6 +459,10 @@
     z-index: 5;
     background: var(--panel-bg);
     border-right: 2px solid var(--border-mid);
+    flex: 0 0 200px;
+    width: 200px;
+    min-width: 200px;
+    max-width: 200px;
   }
   .data-row.even .td:first-child {
     background: color-mix(in srgb, var(--panel-bg) 50%, var(--bg) 50%);
