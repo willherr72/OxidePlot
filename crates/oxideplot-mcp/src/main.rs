@@ -658,7 +658,7 @@ impl OxidePlot {
         let rgba = tokio::task::spawn_blocking(move || {
             pollster::block_on(async move {
                 let r = PlotRenderer::new_offscreen(panel_w, panel_h).await;
-                if panels.len() == 1 {
+                let mut buf: Vec<u8> = if panels.len() == 1 {
                     let (series, grid, uniforms) = &panels[0];
                     let calls = r.build_draw_calls(series, grid, *uniforms);
                     r.render_to_rgba(&calls, clear)
@@ -696,7 +696,42 @@ impl OxidePlot {
                         }
                     }
                     composite
+                };
+
+                // Bake numeric tick labels onto each panel (map tick value → pixel
+                // via the panel's view). Title/legend stay in the text companion.
+                let lc = [198u8, 204, 214, 255];
+                for (i, (_, _, u)) in panels.iter().enumerate() {
+                    let y_off = i as u32 * panel_h;
+                    let (vxmin, vxmax) = (u.view_min[0] as f64, u.view_max[0] as f64);
+                    let (vymin, vymax) = (u.view_min[1] as f64, u.view_max[1] as f64);
+                    let xspan = (vxmax - vxmin).max(1e-12);
+                    let yspan = (vymax - vymin).max(1e-12);
+                    for (v, major) in compute_grid_lines(vxmin, vxmax) {
+                        if !major {
+                            continue;
+                        }
+                        let px = (((v - vxmin) / xspan) * panel_w as f64) as i32;
+                        draw_text(
+                            &mut buf,
+                            panel_w,
+                            out_h,
+                            &format_tick_value(v),
+                            px + 3,
+                            (y_off + panel_h) as i32 - 15,
+                            lc,
+                            2,
+                        );
+                    }
+                    for (v, major) in compute_grid_lines(vymin, vymax) {
+                        if !major {
+                            continue;
+                        }
+                        let py = ((1.0 - (v - vymin) / yspan) * panel_h as f64) as i32 + y_off as i32;
+                        draw_text(&mut buf, panel_w, out_h, &format_tick_value(v), 3, py - 5, lc, 2);
+                    }
                 }
+                buf
             })
         })
         .await
@@ -842,4 +877,55 @@ async fn main() -> anyhow::Result<()> {
     let service = OxidePlot::new().serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+// ─── Minimal 5×7 bitmap font for numeric tick labels (no font asset needed) ─────
+
+/// 5×7 glyph rows (bit 4 = leftmost pixel) for the characters that appear in
+/// numeric tick labels. Unknown chars render as blank (space).
+fn glyph5x7(c: char) -> [u8; 7] {
+    match c {
+        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+        '3' => [0x0E, 0x11, 0x01, 0x06, 0x01, 0x11, 0x0E],
+        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+        '5' => [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
+        '6' => [0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C],
+        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
+        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        '+' => [0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00],
+        'e' | 'E' => [0x00, 0x00, 0x0E, 0x11, 0x1E, 0x10, 0x0E],
+        ':' => [0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00],
+        _ => [0; 7],
+    }
+}
+
+/// Draw `text` onto an RGBA buffer at top-left (x, y), scaled `scale`×, clipped
+/// to the image bounds. Used for baked numeric tick labels.
+fn draw_text(buf: &mut [u8], w: u32, h: u32, text: &str, x: i32, y: i32, color: [u8; 4], scale: i32) {
+    let mut cx = x;
+    for ch in text.chars() {
+        let g = glyph5x7(ch);
+        for (row, bits) in g.iter().enumerate() {
+            for col in 0..5i32 {
+                if (bits >> (4 - col)) & 1 == 1 {
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            let px = cx + col * scale + dx;
+                            let py = y + row as i32 * scale + dy;
+                            if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                                let o = ((py as u32 * w + px as u32) * 4) as usize;
+                                buf[o..o + 4].copy_from_slice(&color);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cx += 6 * scale; // 5px glyph + 1px gap
+    }
 }
