@@ -51,6 +51,44 @@ fn resolve_col(data: &LoadedData, spec: &str) -> Option<usize> {
     data.columns.iter().position(|c| c == spec)
 }
 
+/// Min/max envelope decimation: split into `buckets` equal index ranges and keep
+/// each bucket's min-y AND max-y point (in x order). Unlike LTTB this NEVER drops
+/// a 1-sample spike or dropout — the extreme in each bucket is always kept.
+/// Returns up to 2×buckets points.
+fn minmax_envelope(fx: &[f64], fy: &[f64], buckets: usize) -> (Vec<f64>, Vec<f64>) {
+    let n = fx.len();
+    if buckets == 0 || n <= buckets * 2 {
+        return (fx.to_vec(), fy.to_vec());
+    }
+    let mut ox = Vec::with_capacity(buckets * 2);
+    let mut oy = Vec::with_capacity(buckets * 2);
+    for b in 0..buckets {
+        let lo = b * n / buckets;
+        let hi = ((b + 1) * n / buckets).min(n);
+        if lo >= hi {
+            continue;
+        }
+        let mut imin = lo;
+        let mut imax = lo;
+        for i in lo..hi {
+            if fy[i] < fy[imin] {
+                imin = i;
+            }
+            if fy[i] > fy[imax] {
+                imax = i;
+            }
+        }
+        let (a, c) = if imin <= imax { (imin, imax) } else { (imax, imin) };
+        ox.push(fx[a]);
+        oy.push(fy[a]);
+        if c != a {
+            ox.push(fx[c]);
+            oy.push(fy[c]);
+        }
+    }
+    (ox, oy)
+}
+
 // ─── Session state ────────────────────────────────────────────────────────────
 
 /// A parsed dataset held in the session.
@@ -242,6 +280,24 @@ struct RenderGraphParams {
     /// Window size for a moving_average override (default 5).
     #[serde(default)]
     transform_window: Option<usize>,
+    /// Window to a row-index range (inclusive start, exclusive end) — e.g. rows
+    /// 6700–6800 to inspect a glitch. Rows within the window are NOT downsampled
+    /// unless they still exceed ~2×width, so single-sample spikes survive.
+    #[serde(default)]
+    row_start: Option<usize>,
+    #[serde(default)]
+    row_end: Option<usize>,
+    /// Window to an X-value range. For a numeric X these are the values; for a
+    /// datetime X they are epoch seconds. Applied in addition to row_start/end.
+    #[serde(default)]
+    x_min: Option<f64>,
+    #[serde(default)]
+    x_max: Option<f64>,
+    /// Downsampling for large series: "minmax" (default — keeps the min & max of
+    /// each bucket, so single-sample spikes/dropouts are NEVER lost; best for QC),
+    /// "lttb" (smoother, may drop a lone spike), or "none" (plot every point).
+    #[serde(default)]
+    downsample: Option<String>,
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -515,6 +571,11 @@ impl OxidePlot {
             layout,
             transform,
             transform_window,
+            row_start,
+            row_end,
+            x_min,
+            x_max,
+            downsample,
         }): Parameters<RenderGraphParams>,
     ) -> Result<CallToolResult, McpError> {
         // Build per-panel render inputs under the lock; render without holding it.
@@ -553,6 +614,7 @@ impl OxidePlot {
             // are LTTB-downsampled to ~2×width for rendering (keeps the shape,
             // renders fast — this is the win for files too big to read directly).
             let render_cap = (w as usize) * 2;
+            let ds_mode = downsample.as_deref().unwrap_or("minmax");
             let mut sdata: Vec<PanelSeries> = Vec::new();
             let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
             let mut max_raw_points = 0usize;
@@ -565,22 +627,34 @@ impl OxidePlot {
                 let mut fx: Vec<f64> = Vec::new();
                 let mut fy: Vec<f64> = Vec::new();
                 let (mut ymn, mut ymx) = (f64::INFINITY, f64::NEG_INFINITY);
-                for (&x, &y) in xs.iter().zip(ysv.iter()) {
-                    if x.is_finite() && y.is_finite() {
-                        fx.push(x);
-                        fy.push(y);
-                        xmin = xmin.min(x);
-                        xmax = xmax.max(x);
-                        ymn = ymn.min(y);
-                        ymx = ymx.max(y);
+                for (row, (&x, &y)) in xs.iter().zip(ysv.iter()).enumerate() {
+                    if row_start.is_some_and(|rs| row < rs) || row_end.is_some_and(|re| row >= re) {
+                        continue;
                     }
+                    if !x.is_finite() || !y.is_finite() {
+                        continue;
+                    }
+                    if x_min.is_some_and(|xm| x < xm) || x_max.is_some_and(|xx| x > xx) {
+                        continue;
+                    }
+                    fx.push(x);
+                    fy.push(y);
+                    xmin = xmin.min(x);
+                    xmax = xmax.max(x);
+                    ymn = ymn.min(y);
+                    ymx = ymx.max(y);
                 }
                 max_raw_points = max_raw_points.max(fx.len());
 
                 // Downsample for rendering if there are far more points than pixels.
-                let (fx, fy) = if fx.len() > render_cap * 2 {
+                // Default "minmax" keeps each bucket's extremes so spikes survive.
+                let (fx, fy) = if ds_mode != "none" && fx.len() > render_cap * 2 {
                     any_downsampled = true;
-                    lttb_downsample(&fx, &fy, render_cap)
+                    if ds_mode == "lttb" {
+                        lttb_downsample(&fx, &fy, render_cap)
+                    } else {
+                        minmax_envelope(&fx, &fy, w as usize)
+                    }
                 } else {
                     (fx, fy)
                 };
@@ -678,6 +752,8 @@ impl OxidePlot {
                 "size": [w, out_h],
                 "points_per_series": max_raw_points,
                 "downsampled_for_render": any_downsampled,
+                "downsample": ds_mode,
+                "window": { "row_start": row_start, "row_end": row_end, "x_min": x_min, "x_max": x_max },
                 "note": note,
             })
             .to_string();
