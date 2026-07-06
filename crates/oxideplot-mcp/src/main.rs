@@ -15,6 +15,7 @@ use rmcp::{
 use serde_json::json;
 use tokio::sync::Mutex;
 
+use oxideplot_core::data::datetime::format_timestamp;
 use oxideplot_core::data::loader::{
     column_to_f64, column_to_timestamps, load_from_bytes, FileMeta, LoadedData,
 };
@@ -517,7 +518,7 @@ impl OxidePlot {
         }): Parameters<RenderGraphParams>,
     ) -> Result<CallToolResult, McpError> {
         // Build per-panel render inputs under the lock; render without holding it.
-        let (panels, panel_w, panel_h, out_h, clear, text) = {
+        let (panels, panel_w, panel_h, out_h, clear, x_is_time, text) = {
             let s = self.session.lock().await;
             let g = s.graphs.get(&graph_id).ok_or_else(|| {
                 McpError::invalid_params(format!("unknown graph_id '{graph_id}'"), None)
@@ -541,11 +542,11 @@ impl OxidePlot {
                 None => g.transform,
             };
 
-            // X values: datetime → timestamps, else numeric.
+            // X values: datetime → epoch-second timestamps, else numeric.
             let xcol = &ds.data.column_data[g.x_col];
-            let xs: Vec<f64> = match column_to_timestamps(xcol) {
-                Some((v, _)) => v,
-                None => column_to_f64(xcol).0,
+            let (xs, x_is_time): (Vec<f64>, bool) = match column_to_timestamps(xcol) {
+                Some((v, _)) => (v, true),
+                None => (column_to_f64(xcol).0, false),
             };
 
             // Per-series finite points + colour + own y-range. Very large series
@@ -636,8 +637,19 @@ impl OxidePlot {
             let x_ticks: Vec<String> = compute_grid_lines(x_view.0, x_view.1)
                 .iter()
                 .filter(|(_, m)| *m)
-                .map(|(v, _)| format_tick_value(*v))
+                .map(|(v, _)| {
+                    if x_is_time {
+                        format_timestamp(*v)
+                    } else {
+                        format_tick_value(*v)
+                    }
+                })
                 .collect();
+            let x_range_json = if x_is_time {
+                json!([format_timestamp(xmin), format_timestamp(xmax)])
+            } else {
+                json!([xmin, xmax])
+            };
             let legend: Vec<serde_json::Value> = sdata
                 .iter()
                 .map(|sd| {
@@ -659,7 +671,8 @@ impl OxidePlot {
                 "layout": lay.as_str(),
                 "transform": tf.label(),
                 "x_axis": ds.data.columns[g.x_col].clone(),
-                "x_range": [xmin, xmax],
+                "x_is_time": x_is_time,
+                "x_range": x_range_json,
                 "x_ticks": x_ticks,
                 "series": legend,
                 "size": [w, out_h],
@@ -670,7 +683,7 @@ impl OxidePlot {
             .to_string();
 
             let clear = [0.055_f64, 0.059, 0.075, 1.0];
-            (panels, w, panel_h, out_h, clear, text)
+            (panels, w, panel_h, out_h, clear, x_is_time, text)
         };
 
         // Render off the lock, on a blocking thread (GPU read-back blocks).
@@ -726,6 +739,7 @@ impl OxidePlot {
                     let (vymin, vymax) = (u.view_min[1] as f64, u.view_max[1] as f64);
                     let xspan = (vxmax - vxmin).max(1e-12);
                     let yspan = (vymax - vymin).max(1e-12);
+                    let x_scale = if x_is_time { 1 } else { 2 }; // datetime labels are longer
                     for (v, major) in compute_grid_lines(vxmin, vxmax) {
                         if !major {
                             continue;
@@ -735,11 +749,11 @@ impl OxidePlot {
                             &mut buf,
                             panel_w,
                             out_h,
-                            &format_tick_value(v),
+                            &fmt_x_tick(v, x_is_time, vxmax - vxmin),
                             px + 3,
-                            (y_off + panel_h) as i32 - 15,
+                            (y_off + panel_h) as i32 - if x_is_time { 10 } else { 15 },
                             lc,
-                            2,
+                            x_scale,
                         );
                     }
                     for (v, major) in compute_grid_lines(vymin, vymax) {
@@ -946,5 +960,37 @@ fn draw_text(buf: &mut [u8], w: u32, h: u32, text: &str, x: i32, y: i32, color: 
             }
         }
         cx += 6 * scale; // 5px glyph + 1px gap
+    }
+}
+
+/// Compact datetime tick label chosen by the visible span. Uses only digits /
+/// '-' / ':' (renderable by the 5×7 font). Reuses core `format_timestamp`.
+fn fmt_time_tick(ts: f64, span_secs: f64) -> String {
+    let full = format_timestamp(ts);
+    let base = full.split('.').next().unwrap_or(&full); // drop fractional seconds
+    let mut it = base.splitn(2, ' ');
+    let date = it.next().unwrap_or(base); // "YYYY-MM-DD"
+    let time = it.next().unwrap_or(""); // "HH:MM:SS"
+    if span_secs <= 2.0 * 86_400.0 && !time.is_empty() {
+        time.to_string()
+    } else if span_secs <= 400.0 * 86_400.0 {
+        let md = date.get(5..).unwrap_or(date); // "MM-DD"
+        let hm = time.get(0..5).unwrap_or(time); // "HH:MM"
+        if hm.is_empty() {
+            md.to_string()
+        } else {
+            format!("{md} {hm}")
+        }
+    } else {
+        date.to_string()
+    }
+}
+
+/// Format an x-axis tick: datetime-aware when `x_is_time`, else numeric.
+fn fmt_x_tick(v: f64, x_is_time: bool, span: f64) -> String {
+    if x_is_time {
+        fmt_time_tick(v, span)
+    } else {
+        format_tick_value(v)
     }
 }
