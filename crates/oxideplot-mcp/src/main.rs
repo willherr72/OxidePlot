@@ -137,6 +137,58 @@ fn compute_psd(vals: &[f64], fs: f64) -> (Vec<f64>, Vec<f64>) {
     (freqs, power)
 }
 
+/// Short-time FFT magnitude matrix (`frames[frame][bin]`, bins = window/2, hop =
+/// window/2). Returns the matrix and the bin count.
+fn compute_spectrogram(vals: &[f64], window: usize) -> (Vec<Vec<f64>>, usize) {
+    let y: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+    let w = window.clamp(16, 4096);
+    let n = y.len();
+    if n < w {
+        return (vec![], 0);
+    }
+    let hop = (w / 2).max(1);
+    let bins = w / 2;
+    let fft = FftPlanner::new().plan_fft_forward(w);
+    let hann: Vec<f64> = (0..w)
+        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / (w as f64 - 1.0)).cos())
+        .collect();
+    let mut frames: Vec<Vec<f64>> = Vec::new();
+    let mut start = 0;
+    while start + w <= n {
+        let mut buf: Vec<Complex<f64>> = (0..w)
+            .map(|i| Complex::new(y[start + i] * hann[i], 0.0))
+            .collect();
+        fft.process(&mut buf);
+        frames.push((0..bins).map(|k| buf[k].norm_sqr().sqrt()).collect());
+        start += hop;
+    }
+    (frames, bins)
+}
+
+/// Magma-like colormap: t in 0..1 -> RGB. For spectrogram intensity.
+fn heat_color(t: f64) -> [u8; 3] {
+    const STOPS: [(f64, [f64; 3]); 5] = [
+        (0.0, [0.0, 0.0, 0.02]),
+        (0.25, [0.28, 0.05, 0.35]),
+        (0.5, [0.65, 0.18, 0.42]),
+        (0.75, [0.95, 0.45, 0.28]),
+        (1.0, [0.99, 0.87, 0.55]),
+    ];
+    let t = t.clamp(0.0, 1.0);
+    let mut i = 0;
+    while i + 1 < STOPS.len() && t > STOPS[i + 1].0 {
+        i += 1;
+    }
+    let (t0, c0) = STOPS[i];
+    let (t1, c1) = STOPS[(i + 1).min(STOPS.len() - 1)];
+    let f = if t1 > t0 { (t - t0) / (t1 - t0) } else { 0.0 };
+    [
+        ((c0[0] + (c1[0] - c0[0]) * f) * 255.0) as u8,
+        ((c0[1] + (c1[1] - c0[1]) * f) * 255.0) as u8,
+        ((c0[2] + (c1[2] - c0[2]) * f) * 255.0) as u8,
+    ]
+}
+
 /// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
 fn longest_constant_run(cells: &[String]) -> usize {
     let mut best = 0usize;
@@ -352,6 +404,26 @@ struct SpectrumParams {
     /// Sample rate in Hz. Omit to infer from a datetime column (1/median dt).
     #[serde(default)]
     sample_rate: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SpectrogramParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// Numeric column (name or index) to analyse.
+    column: String,
+    /// Sample rate in Hz. Omit to infer from a datetime column.
+    #[serde(default)]
+    sample_rate: Option<f64>,
+    /// FFT window size in samples (default 256; frequency resolution = fs/window,
+    /// so a larger window gives finer frequency but coarser time).
+    #[serde(default)]
+    window: Option<usize>,
+    /// Image width/height in px (defaults 760×380).
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -840,6 +912,130 @@ impl OxidePlot {
             "peaks": peaks,
             "note": "PSD stored as a new dataset (columns: frequency, power). Render with create_graph x=frequency y=power, then render_graph y_scale=log. 'peaks' are the dominant frequencies.",
         })))
+    }
+
+    #[tool(
+        description = "Spectrogram (STFT): a frequency-vs-time heatmap PNG of a numeric column (Y=frequency 0..Nyquist, X=time, colour=intensity). Shows how the frequency content evolves over the run — a band that shifts vertically means changing resonance. Sample rate inferred from a datetime column unless given."
+    )]
+    async fn spectrogram(
+        &self,
+        Parameters(SpectrogramParams {
+            dataset_id,
+            column,
+            sample_rate,
+            window,
+            width,
+            height,
+        }): Parameters<SpectrogramParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (vals, fs, colname) = {
+            let s = self.session.lock().await;
+            let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+            })?;
+            let ci = resolve_col(&ds.data, &column).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown column '{column}'"), None)
+            })?;
+            if !ds.numeric_cols[ci] {
+                return Err(McpError::invalid_params(
+                    format!("column '{}' is not numeric", ds.data.columns[ci]),
+                    None,
+                ));
+            }
+            let fs = sample_rate.unwrap_or_else(|| infer_sample_rate(ds));
+            (
+                column_to_f64(&ds.data.column_data[ci]).0,
+                fs,
+                ds.data.columns[ci].clone(),
+            )
+        };
+
+        let win = window.unwrap_or(256).clamp(16, 4096);
+        let w = width.unwrap_or(760).clamp(200, 2000);
+        let h = height.unwrap_or(380).clamp(150, 1200);
+
+        let (frames, bins) =
+            tokio::task::spawn_blocking(move || compute_spectrogram(&vals, win))
+                .await
+                .map_err(|e| McpError::internal_error(format!("stft task failed: {e}"), None))?;
+        if frames.is_empty() || bins == 0 {
+            return Err(McpError::internal_error(
+                format!("need at least {win} finite samples for a spectrogram"),
+                None,
+            ));
+        }
+        let n_frames = frames.len();
+
+        // Colour range from the 5th–99.5th percentile of log-magnitude (contrast).
+        let mut logs: Vec<f64> = frames
+            .iter()
+            .flat_map(|f| f.iter().map(|&m| (m + 1e-12).log10()))
+            .collect();
+        logs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let lo = logs[(logs.len() as f64 * 0.05) as usize];
+        let hi = logs[((logs.len() - 1) as f64 * 0.995) as usize];
+        let span = (hi - lo).max(1e-9);
+
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        for py in 0..h {
+            let bin = (((h - 1 - py) as usize) * bins / h as usize).min(bins - 1);
+            for px in 0..w {
+                let fr = (px as usize * n_frames / w as usize).min(n_frames - 1);
+                let t = ((frames[fr][bin] + 1e-12).log10() - lo) / span;
+                let [r, g, b] = heat_color(t);
+                let o = ((py * w + px) * 4) as usize;
+                buf[o] = r;
+                buf[o + 1] = g;
+                buf[o + 2] = b;
+                buf[o + 3] = 255;
+            }
+        }
+
+        // Baked axes: frequency (Y, 0..Nyquist) and time (X, seconds).
+        let nyq = fs / 2.0;
+        let total_time = n_frames as f64 * (win as f64 / 2.0) / fs;
+        let lc = [235u8, 235, 240, 255];
+        for k in 0..=4 {
+            let f = nyq * k as f64 / 4.0;
+            let py = ((1.0 - f / nyq.max(1e-9)) * h as f64) as i32 - 7;
+            draw_text(&mut buf, w, h, &format!("{f:.0}"), 3, py.clamp(1, h as i32 - 9), lc, 1);
+            let tt = total_time * k as f64 / 4.0;
+            let px = (w as f64 * k as f64 / 4.0) as i32;
+            draw_text(
+                &mut buf,
+                w,
+                h,
+                &format!("{tt:.0}"),
+                (px + 2).min(w as i32 - 26),
+                h as i32 - 11,
+                lc,
+                1,
+            );
+        }
+
+        let img = image::RgbaImage::from_raw(w, h, buf).ok_or_else(|| {
+            McpError::internal_error("spectrogram buffer mis-sized".to_string(), None)
+        })?;
+        let mut png: Vec<u8> = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| McpError::internal_error(format!("PNG encode failed: {e}"), None))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+
+        let text = json!({
+            "of_column": colname,
+            "sample_rate_hz": fs,
+            "window_samples": win,
+            "n_frames": n_frames,
+            "freq_bins": bins,
+            "freq_range_hz": [0.0, nyq],
+            "time_range_s": [0.0, total_time],
+            "note": "Heatmap: Y=frequency (0 bottom → Nyquist top), X=time (s), colour=intensity (dark=low, bright=high). A band shifting vertically over time = changing resonance.",
+        })
+        .to_string();
+        Ok(CallToolResult::success(vec![
+            Content::image(b64, "image/png".to_string()),
+            Content::text(text),
+        ]))
     }
 
     #[tool(
