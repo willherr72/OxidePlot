@@ -19,6 +19,8 @@ use oxideplot_core::data::loader::{
     column_to_f64, column_to_timestamps, load_from_bytes, FileMeta, LoadedData,
 };
 use oxideplot_core::data::table::{compute_view_index, window_rows, TableQuery};
+use oxideplot_core::processing::downsampling::lttb_downsample;
+use oxideplot_core::processing::math_ops;
 use oxideplot_core::processing::statistics::SeriesStats;
 use oxideplot_core::render::axis::{compute_grid_lines, format_tick_value};
 use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
@@ -86,6 +88,46 @@ impl Layout {
     }
 }
 
+/// An optional per-series transform applied before plotting (reuses core math).
+#[derive(Clone, Copy, Debug)]
+enum Transform {
+    None,
+    MovingAverage(usize),
+    Derivative,
+    Integral,
+}
+
+impl Transform {
+    fn parse(kind: Option<&str>, window: Option<usize>) -> Self {
+        match kind {
+            Some("moving_average") | Some("smooth") => {
+                Transform::MovingAverage(window.unwrap_or(5).max(1))
+            }
+            Some("derivative") => Transform::Derivative,
+            Some("integral") => Transform::Integral,
+            _ => Transform::None,
+        }
+    }
+    /// Short suffix for legends/titles, or None if no transform.
+    fn label(self) -> Option<String> {
+        match self {
+            Transform::None => None,
+            Transform::MovingAverage(w) => Some(format!("MA({w})")),
+            Transform::Derivative => Some("d/dx".to_string()),
+            Transform::Integral => Some("∫".to_string()),
+        }
+    }
+    /// Apply to a series' `(xs, ys)`, returning the transformed y values.
+    fn apply(self, xs: &[f64], ys: &[f64]) -> Vec<f64> {
+        match self {
+            Transform::None => ys.to_vec(),
+            Transform::MovingAverage(w) => math_ops::moving_average(ys, w),
+            Transform::Derivative => math_ops::derivative(xs, ys),
+            Transform::Integral => math_ops::integral(xs, ys),
+        }
+    }
+}
+
 /// A graph definition (which dataset + columns to plot).
 struct GraphSpec {
     dataset_id: String,
@@ -93,6 +135,7 @@ struct GraphSpec {
     y_cols: Vec<usize>,
     draw_mode: DrawMode,
     layout: Layout,
+    transform: Transform,
     title: Option<String>,
 }
 
@@ -165,6 +208,13 @@ struct CreateGraphParams {
     /// "stacked" (one panel per series with its own Y axis, sharing X).
     #[serde(default)]
     layout: Option<String>,
+    /// Transform applied to every Y series before plotting: "moving_average"
+    /// (smoothing), "derivative" (dy/dx), or "integral" (cumulative). Omit for none.
+    #[serde(default)]
+    transform: Option<String>,
+    /// Window size for moving_average (default 5).
+    #[serde(default)]
+    transform_window: Option<usize>,
     /// Optional title (echoed in the render text).
     #[serde(default)]
     title: Option<String>,
@@ -184,6 +234,13 @@ struct RenderGraphParams {
     /// "stacked". Omit to use the layout set at create_graph time.
     #[serde(default)]
     layout: Option<String>,
+    /// Override the graph's transform for this render: "moving_average",
+    /// "derivative", "integral", or "none". Omit to use the create_graph value.
+    #[serde(default)]
+    transform: Option<String>,
+    /// Window size for a moving_average override (default 5).
+    #[serde(default)]
+    transform_window: Option<usize>,
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -366,6 +423,8 @@ impl OxidePlot {
             y_cols,
             draw_mode,
             layout,
+            transform,
+            transform_window,
             title,
         }): Parameters<CreateGraphParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -398,6 +457,7 @@ impl OxidePlot {
             _ => DrawMode::Lines,
         };
         let lay = Layout::parse(layout.as_deref());
+        let tf = Transform::parse(transform.as_deref(), transform_window);
 
         let id = s.new_id("gr");
         s.graphs.insert(
@@ -408,6 +468,7 @@ impl OxidePlot {
                 y_cols: ys,
                 draw_mode: dm,
                 layout: lay,
+                transform: tf,
                 title,
             },
         );
@@ -418,6 +479,7 @@ impl OxidePlot {
             "ys": y_names,
             "draw_mode": format!("{dm:?}").to_lowercase(),
             "layout": lay.as_str(),
+            "transform": tf.label(),
         })))
     }
 
@@ -431,6 +493,8 @@ impl OxidePlot {
             width,
             height,
             layout,
+            transform,
+            transform_window,
         }): Parameters<RenderGraphParams>,
     ) -> Result<CallToolResult, McpError> {
         // Build per-panel render inputs under the lock; render without holding it.
@@ -452,6 +516,11 @@ impl OxidePlot {
                 Some(v) => Layout::parse(Some(v)),
                 None => g.layout,
             };
+            let tf = match transform.as_deref() {
+                Some("none") => Transform::None,
+                Some(k) => Transform::parse(Some(k), transform_window),
+                None => g.transform,
+            };
 
             // X values: datetime → timestamps, else numeric.
             let xcol = &ds.data.column_data[g.x_col];
@@ -460,22 +529,47 @@ impl OxidePlot {
                 None => column_to_f64(xcol).0,
             };
 
-            // Per-series finite points + colour + own y-range.
+            // Per-series finite points + colour + own y-range. Very large series
+            // are LTTB-downsampled to ~2×width for rendering (keeps the shape,
+            // renders fast — this is the win for files too big to read directly).
+            let render_cap = (w as usize) * 2;
             let mut sdata: Vec<PanelSeries> = Vec::new();
             let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+            let mut max_raw_points = 0usize;
+            let mut any_downsampled = false;
             for (k, &yc) in g.y_cols.iter().enumerate() {
                 let (ysv, _) = column_to_f64(&ds.data.column_data[yc]);
-                let mut pts: Vec<[f32; 2]> = Vec::new();
+                let ysv = tf.apply(&xs, &ysv); // optional transform (smooth/derivative/integral)
+
+                // Finite (x, y) pairs + y-range over the FULL series.
+                let mut fx: Vec<f64> = Vec::new();
+                let mut fy: Vec<f64> = Vec::new();
                 let (mut ymn, mut ymx) = (f64::INFINITY, f64::NEG_INFINITY);
                 for (&x, &y) in xs.iter().zip(ysv.iter()) {
                     if x.is_finite() && y.is_finite() {
-                        pts.push([x as f32, y as f32]);
+                        fx.push(x);
+                        fy.push(y);
                         xmin = xmin.min(x);
                         xmax = xmax.max(x);
                         ymn = ymn.min(y);
                         ymx = ymx.max(y);
                     }
                 }
+                max_raw_points = max_raw_points.max(fx.len());
+
+                // Downsample for rendering if there are far more points than pixels.
+                let (fx, fy) = if fx.len() > render_cap * 2 {
+                    any_downsampled = true;
+                    lttb_downsample(&fx, &fy, render_cap)
+                } else {
+                    (fx, fy)
+                };
+
+                let pts: Vec<[f32; 2]> = fx
+                    .iter()
+                    .zip(fy.iter())
+                    .map(|(&x, &y)| [x as f32, y as f32])
+                    .collect();
                 sdata.push(PanelSeries {
                     name: ds.data.columns[yc].clone(),
                     color: PALETTE[k % PALETTE.len()],
@@ -544,11 +638,14 @@ impl OxidePlot {
             let text = json!({
                 "title": g.title.clone(),
                 "layout": lay.as_str(),
+                "transform": tf.label(),
                 "x_axis": ds.data.columns[g.x_col].clone(),
                 "x_range": [xmin, xmax],
                 "x_ticks": x_ticks,
                 "series": legend,
                 "size": [w, out_h],
+                "points_per_series": max_raw_points,
+                "downsampled_for_render": any_downsampled,
                 "note": note,
             })
             .to_string();
