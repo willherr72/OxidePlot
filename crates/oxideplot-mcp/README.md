@@ -12,15 +12,20 @@ stdio, so it plugs into Claude Code, Claude Desktop, or any MCP client.
 | Tool | Purpose |
 |------|---------|
 | `load_csv` | Parse a CSV/Excel file → `dataset_id` + columns (name, kind) + row count |
-| `describe_data` | Per-column stats + **QC**: n_missing, pct_zero, distinct, longest_constant_run (flag dead/frozen/duplicate channels), plus min/max/mean/median/std for numeric. All columns by default |
+| `health_check` | **One-call QC scan** → severity-ranked issues: dead/frozen channels, robust-z glitches, changepoints, time gaps, missing clusters |
+| `describe_data` | Per-column stats + QC: n_missing, pct_zero, distinct, longest_constant_run, plus min/max/mean/median/std for numeric. All columns by default |
+| `segment_stats` | Split into N row-windows → per-segment mean/std/min/max (catches mid-run level shifts a whole-run stat hides) |
 | `query_data` | A page of raw rows, with sort / case-insensitive search / paging |
 | `correlate` | Pearson correlation matrix + pairs sorted by \|r\| (spot a decorrelated/damaged axis) |
+| `spectrum` | FFT/PSD of a column → new `frequency`/`power` dataset + dominant peaks (stick-slip / whirl signatures) |
+| `spectrogram` | STFT → frequency-vs-time heatmap PNG (a shifting band = changing resonance) |
 | `derive_column` | Add a computed column: `magnitude` √(x²+…), `add`/`mean`, `subtract`/`ratio`, `scale` |
 | `create_graph` | Pick X + one-or-more Y columns (by name or index) → `graph_id` |
 | `render_graph` | Render to a **PNG** (baked axis tick labels, datetime-aware X) + a text block (ranges, ticks, legend) |
 
-The intended loop: `load_csv → describe_data` / `query_data` / `correlate`
-(understand) → `create_graph → render_graph` (see it) → refine.
+The intended loop: `health_check` (triage) → `describe_data` / `segment_stats` /
+`query_data` / `correlate` / `spectrum` (understand) → `create_graph → render_graph`
+/ `spectrogram` (see it) → refine.
 
 ### Render options (`create_graph` / `render_graph`)
 
