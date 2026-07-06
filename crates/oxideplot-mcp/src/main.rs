@@ -435,11 +435,30 @@ impl OxidePlot {
             })?;
             let x = resolve_col(&ds.data, &x_col)
                 .ok_or_else(|| McpError::invalid_params(format!("unknown x_col '{x_col}'"), None))?;
+            if !ds.numeric_cols[x] {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "x_col '{}' is a text column; X must be numeric or datetime",
+                        ds.data.columns[x]
+                    ),
+                    None,
+                ));
+            }
             let mut ys = Vec::new();
             for name in &y_cols {
-                ys.push(resolve_col(&ds.data, name).ok_or_else(|| {
+                let ci = resolve_col(&ds.data, name).ok_or_else(|| {
                     McpError::invalid_params(format!("unknown y_col '{name}'"), None)
-                })?);
+                })?;
+                if !ds.numeric_cols[ci] {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "y_col '{}' is a text column; Y columns must be numeric",
+                            ds.data.columns[ci]
+                        ),
+                        None,
+                    ));
+                }
+                ys.push(ci);
             }
             if ys.is_empty() {
                 return Err(McpError::invalid_params(
