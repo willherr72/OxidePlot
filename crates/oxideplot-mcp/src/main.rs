@@ -51,6 +51,39 @@ fn resolve_col(data: &LoadedData, spec: &str) -> Option<usize> {
     data.columns.iter().position(|c| c == spec)
 }
 
+/// Pearson correlation over rows where both series are finite. None if < 2 pairs
+/// or a series has zero variance.
+fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
+    let mut n = 0usize;
+    let (mut sx, mut sy) = (0.0, 0.0);
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        if x.is_finite() && y.is_finite() {
+            n += 1;
+            sx += x;
+            sy += y;
+        }
+    }
+    if n < 2 {
+        return None;
+    }
+    let (mx, my) = (sx / n as f64, sy / n as f64);
+    let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        if x.is_finite() && y.is_finite() {
+            let (dx, dy) = (x - mx, y - my);
+            sxy += dx * dy;
+            sxx += dx * dx;
+            syy += dy * dy;
+        }
+    }
+    let denom = (sxx * syy).sqrt();
+    if denom == 0.0 {
+        None
+    } else {
+        Some(sxy / denom)
+    }
+}
+
 /// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
 fn longest_constant_run(cells: &[String]) -> usize {
     let mut best = 0usize;
@@ -223,6 +256,15 @@ struct DescribeParams {
     /// Dataset id returned by load_csv.
     dataset_id: String,
     /// Column names to describe. Omit to describe all numeric columns.
+    #[serde(default)]
+    columns: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CorrelateParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// Numeric columns to correlate (names or indices). Omit for all numeric columns.
     #[serde(default)]
     columns: Option<Vec<String>>,
 }
@@ -452,6 +494,83 @@ impl OxidePlot {
             out.push(serde_json::Value::Object(obj));
         }
         Ok(Self::text_result(json!({ "stats": out })))
+    }
+
+    #[tool(
+        description = "Pearson correlation across a dataset's numeric columns. Returns the correlation matrix (when <=20 columns) plus every pair sorted by |correlation| — use it to spot a decorrelated/damaged axis (redundant sensors should be near +/-1; an unexpectedly low value flags a problem)."
+    )]
+    async fn correlate(
+        &self,
+        Parameters(CorrelateParams {
+            dataset_id,
+            columns,
+        }): Parameters<CorrelateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let s = self.session.lock().await;
+        let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+            McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+        })?;
+
+        let idxs: Vec<usize> = match columns {
+            Some(names) => names
+                .iter()
+                .filter_map(|n| resolve_col(&ds.data, n))
+                .filter(|&c| ds.numeric_cols[c])
+                .collect(),
+            None => (0..ds.data.columns.len())
+                .filter(|&c| ds.numeric_cols[c])
+                .collect(),
+        };
+        if idxs.len() < 2 {
+            return Err(McpError::invalid_params(
+                "need at least 2 numeric columns to correlate".to_string(),
+                None,
+            ));
+        }
+
+        let cols: Vec<(String, Vec<f64>)> = idxs
+            .iter()
+            .map(|&c| {
+                (
+                    ds.data.columns[c].clone(),
+                    column_to_f64(&ds.data.column_data[c]).0,
+                )
+            })
+            .collect();
+        let n = cols.len();
+        let round3 = |x: f64| (x * 1000.0).round() / 1000.0;
+
+        let mut matrix = vec![vec![serde_json::Value::Null; n]; n];
+        let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+        for i in 0..n {
+            matrix[i][i] = json!(1.0);
+            for j in (i + 1)..n {
+                let r = pearson(&cols[i].1, &cols[j].1);
+                let rv = r.map(round3);
+                matrix[i][j] = json!(rv);
+                matrix[j][i] = json!(rv);
+                if let Some(x) = r {
+                    pairs.push((x, i, j));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| {
+            b.0.abs()
+                .partial_cmp(&a.0.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let pairs_json: Vec<_> = pairs
+            .iter()
+            .take(60)
+            .map(|(r, i, j)| json!({ "a": cols[*i].0, "b": cols[*j].0, "r": round3(*r) }))
+            .collect();
+
+        let names: Vec<&String> = cols.iter().map(|c| &c.0).collect();
+        let mut out = json!({ "columns": names, "pairs_by_abs_correlation": pairs_json });
+        if n <= 20 {
+            out["matrix"] = json!(matrix);
+        }
+        Ok(Self::text_result(out))
     }
 
     #[tool(
