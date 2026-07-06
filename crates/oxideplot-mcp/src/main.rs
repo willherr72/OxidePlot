@@ -12,7 +12,10 @@ use rmcp::{
     tool, tool_handler, tool_router, transport::stdio, ErrorData as McpError, ServerHandler,
     ServiceExt,
 };
+use rustfft::num_complex::Complex;
+use rustfft::FftPlanner;
 use serde_json::json;
+use std::f64::consts::PI;
 use tokio::sync::Mutex;
 
 use oxideplot_core::data::datetime::format_timestamp;
@@ -82,6 +85,56 @@ fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
     } else {
         Some(sxy / denom)
     }
+}
+
+/// Infer the sample rate (Hz) from the dataset's first datetime column (1/median
+/// dt between rows). Falls back to 1.0 (freq then reads in cycles/sample).
+fn infer_sample_rate(ds: &Dataset) -> f64 {
+    for c in 0..ds.data.columns.len() {
+        if let Some((ts, frac)) = column_to_timestamps(&ds.data.column_data[c]) {
+            if frac >= 0.5 && ts.len() >= 2 {
+                let mut dts: Vec<f64> = ts
+                    .windows(2)
+                    .map(|w| w[1] - w[0])
+                    .filter(|d| d.is_finite() && *d > 0.0)
+                    .collect();
+                if !dts.is_empty() {
+                    dts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let md = dts[dts.len() / 2];
+                    if md > 0.0 {
+                        return 1.0 / md;
+                    }
+                }
+            }
+        }
+    }
+    1.0
+}
+
+/// Hann-windowed, mean-removed FFT of `vals`, returning one-sided (frequency,
+/// power) arrays (DC bin dropped). `fs` is the sample rate in Hz.
+fn compute_psd(vals: &[f64], fs: f64) -> (Vec<f64>, Vec<f64>) {
+    let y: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+    let n = y.len();
+    if n < 4 {
+        return (vec![], vec![]);
+    }
+    let mean = y.iter().sum::<f64>() / n as f64;
+    let mut buf: Vec<Complex<f64>> = (0..n)
+        .map(|i| {
+            let w = 0.5 - 0.5 * (2.0 * PI * i as f64 / (n as f64 - 1.0)).cos();
+            Complex::new((y[i] - mean) * w, 0.0)
+        })
+        .collect();
+    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+    let half = n / 2;
+    let mut freqs = Vec::with_capacity(half);
+    let mut power = Vec::with_capacity(half);
+    for k in 1..half {
+        freqs.push(k as f64 * fs / n as f64);
+        power.push(buf[k].norm_sqr() / n as f64);
+    }
+    (freqs, power)
 }
 
 /// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
@@ -288,6 +341,17 @@ struct DeriveParams {
     /// For "scale": the offset (default 0).
     #[serde(default)]
     offset: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SpectrumParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// Numeric column (name or index) to compute the spectrum of.
+    column: String,
+    /// Sample rate in Hz. Omit to infer from a datetime column (1/median dt).
+    #[serde(default)]
+    sample_rate: Option<f64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -698,6 +762,83 @@ impl OxidePlot {
             "min": st.as_ref().map(|s| s.min),
             "max": st.as_ref().map(|s| s.max),
             "mean": st.as_ref().map(|s| s.mean),
+        })))
+    }
+
+    #[tool(
+        description = "Power spectral density (FFT) of a numeric column — for vibration/shock data whose signatures (stick-slip, whirl, bit-bounce) live in the frequency domain. Stores the PSD as a new dataset (columns: frequency, power) and returns the dominant peak frequencies. Sample rate is inferred from a datetime column unless given."
+    )]
+    async fn spectrum(
+        &self,
+        Parameters(SpectrumParams {
+            dataset_id,
+            column,
+            sample_rate,
+        }): Parameters<SpectrumParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut s = self.session.lock().await;
+        let (freqs, power, fs, colname) = {
+            let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+            })?;
+            let ci = resolve_col(&ds.data, &column).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown column '{column}'"), None)
+            })?;
+            if !ds.numeric_cols[ci] {
+                return Err(McpError::invalid_params(
+                    format!("column '{}' is not numeric", ds.data.columns[ci]),
+                    None,
+                ));
+            }
+            let fs = sample_rate.unwrap_or_else(|| infer_sample_rate(ds));
+            let (vals, _) = column_to_f64(&ds.data.column_data[ci]);
+            let (freqs, power) = compute_psd(&vals, fs);
+            (freqs, power, fs, ds.data.columns[ci].clone())
+        };
+        if freqs.is_empty() {
+            return Err(McpError::internal_error(
+                "too few finite samples for a spectrum".to_string(),
+                None,
+            ));
+        }
+
+        let mut order: Vec<usize> = (0..power.len()).collect();
+        order.sort_by(|&a, &b| {
+            power[b]
+                .partial_cmp(&power[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let peaks: Vec<serde_json::Value> = order
+            .iter()
+            .take(6)
+            .map(|&i| json!({ "frequency_hz": (freqs[i]*1000.0).round()/1000.0, "power": power[i] }))
+            .collect();
+
+        let n = freqs.len();
+        let ld = LoadedData {
+            columns: vec!["frequency".to_string(), "power".to_string()],
+            column_data: vec![
+                freqs.iter().map(|v| format!("{v}")).collect(),
+                power.iter().map(|v| format!("{v}")).collect(),
+            ],
+            row_count: n,
+        };
+        let id = s.new_id("ds");
+        s.datasets.insert(
+            id.clone(),
+            Dataset {
+                data: ld,
+                numeric_cols: vec![true, true],
+            },
+        );
+        Ok(Self::text_result(json!({
+            "dataset_id": id,
+            "of_column": colname,
+            "sample_rate_hz": fs,
+            "n_bins": n,
+            "freq_max_hz": freqs.last().copied(),
+            "peaks": peaks,
+            "note": "PSD stored as a new dataset (columns: frequency, power). Render with create_graph x=frequency y=power, then render_graph y_scale=log. 'peaks' are the dominant frequencies.",
         })))
     }
 
