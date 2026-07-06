@@ -58,12 +58,41 @@ struct Dataset {
     numeric_cols: Vec<bool>,
 }
 
+/// How multiple Y series share vertical space in the render.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    /// All series on one shared Y axis (raw values).
+    Overlay,
+    /// All series overlaid, each rescaled to its own 0..1 range (compare shapes).
+    Normalized,
+    /// One stacked panel per series, each with its own Y axis, sharing X.
+    Stacked,
+}
+
+impl Layout {
+    fn parse(s: Option<&str>) -> Self {
+        match s {
+            Some("normalized") => Layout::Normalized,
+            Some("stacked") => Layout::Stacked,
+            _ => Layout::Overlay,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Layout::Overlay => "overlay",
+            Layout::Normalized => "normalized",
+            Layout::Stacked => "stacked",
+        }
+    }
+}
+
 /// A graph definition (which dataset + columns to plot).
 struct GraphSpec {
     dataset_id: String,
     x_col: usize,
     y_cols: Vec<usize>,
     draw_mode: DrawMode,
+    layout: Layout,
     title: Option<String>,
 }
 
@@ -131,6 +160,11 @@ struct CreateGraphParams {
     /// Draw mode: "lines" (default), "step", or "points".
     #[serde(default)]
     draw_mode: Option<String>,
+    /// Vertical layout for multiple Y series: "overlay" (default, shared Y axis),
+    /// "normalized" (overlaid, each rescaled to 0..1 to compare shapes), or
+    /// "stacked" (one panel per series with its own Y axis, sharing X).
+    #[serde(default)]
+    layout: Option<String>,
     /// Optional title (echoed in the render text).
     #[serde(default)]
     title: Option<String>,
@@ -146,6 +180,10 @@ struct RenderGraphParams {
     /// Image height in px (default 560, clamped 150..1400).
     #[serde(default)]
     height: Option<u32>,
+    /// Override the graph's layout for this render: "overlay", "normalized", or
+    /// "stacked". Omit to use the layout set at create_graph time.
+    #[serde(default)]
+    layout: Option<String>,
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -327,6 +365,7 @@ impl OxidePlot {
             x_col,
             y_cols,
             draw_mode,
+            layout,
             title,
         }): Parameters<CreateGraphParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -358,6 +397,7 @@ impl OxidePlot {
             Some("points") => DrawMode::Points,
             _ => DrawMode::Lines,
         };
+        let lay = Layout::parse(layout.as_deref());
 
         let id = s.new_id("gr");
         s.graphs.insert(
@@ -367,6 +407,7 @@ impl OxidePlot {
                 x_col: x,
                 y_cols: ys,
                 draw_mode: dm,
+                layout: lay,
                 title,
             },
         );
@@ -376,6 +417,7 @@ impl OxidePlot {
             "x": x_name,
             "ys": y_names,
             "draw_mode": format!("{dm:?}").to_lowercase(),
+            "layout": lay.as_str(),
         })))
     }
 
@@ -388,10 +430,11 @@ impl OxidePlot {
             graph_id,
             width,
             height,
+            layout,
         }): Parameters<RenderGraphParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Build all render inputs under the lock, then render without holding it.
-        let (series, grid, uniforms, w, h, text) = {
+        // Build per-panel render inputs under the lock; render without holding it.
+        let (panels, panel_w, panel_h, out_h, clear, text) = {
             let s = self.session.lock().await;
             let g = s.graphs.get(&graph_id).ok_or_else(|| {
                 McpError::invalid_params(format!("unknown graph_id '{graph_id}'"), None)
@@ -405,6 +448,10 @@ impl OxidePlot {
 
             let w = width.unwrap_or(900).clamp(200, 2000);
             let h = height.unwrap_or(560).clamp(150, 1400);
+            let lay = match layout.as_deref() {
+                Some(v) => Layout::parse(Some(v)),
+                None => g.layout,
+            };
 
             // X values: datetime → timestamps, else numeric.
             let xcol = &ds.data.column_data[g.x_col];
@@ -413,124 +460,155 @@ impl OxidePlot {
                 None => column_to_f64(xcol).0,
             };
 
-            let mut series = Vec::new();
-            let (mut xmin, mut xmax, mut ymin, mut ymax) =
-                (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+            // Per-series finite points + colour + own y-range.
+            let mut sdata: Vec<PanelSeries> = Vec::new();
+            let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
             for (k, &yc) in g.y_cols.iter().enumerate() {
                 let (ysv, _) = column_to_f64(&ds.data.column_data[yc]);
                 let mut pts: Vec<[f32; 2]> = Vec::new();
+                let (mut ymn, mut ymx) = (f64::INFINITY, f64::NEG_INFINITY);
                 for (&x, &y) in xs.iter().zip(ysv.iter()) {
                     if x.is_finite() && y.is_finite() {
                         pts.push([x as f32, y as f32]);
                         xmin = xmin.min(x);
                         xmax = xmax.max(x);
-                        ymin = ymin.min(y);
-                        ymax = ymax.max(y);
+                        ymn = ymn.min(y);
+                        ymx = ymx.max(y);
                     }
                 }
-                series.push(SeriesGpuData {
-                    points: pts,
+                sdata.push(PanelSeries {
+                    name: ds.data.columns[yc].clone(),
                     color: PALETTE[k % PALETTE.len()],
-                    line_width: 2.0,
-                    point_radius: 3.0,
-                    draw_mode: g.draw_mode,
+                    points: pts,
+                    ymin: ymn,
+                    ymax: ymx,
                 });
             }
-            if !xmin.is_finite() || !ymin.is_finite() || (xmax - xmin) <= 0.0 {
+            if !xmin.is_finite() || (xmax - xmin) <= 0.0 {
                 return Err(McpError::internal_error(
                     "no finite data to plot for this graph".to_string(),
                     None,
                 ));
             }
-
             let xpad = ((xmax - xmin) * 0.03).max(1e-9);
-            let ypad = ((ymax - ymin) * 0.05).max(1e-9);
-            let (vxmin, vxmax, vymin, vymax) =
-                (xmin - xpad, xmax + xpad, ymin - ypad, ymax + ypad);
+            let x_view = (xmin - xpad, xmax + xpad);
 
-            // Build GPU grid segments (the app draws grid via SVG; offscreen needs its own).
-            let x_ticks = compute_grid_lines(vxmin, vxmax);
-            let y_ticks = compute_grid_lines(vymin, vymax);
-            let mut segs: Vec<[f32; 2]> = Vec::new();
-            for (xv, _) in &x_ticks {
-                segs.push([*xv as f32, vymin as f32]);
-                segs.push([*xv as f32, vymax as f32]);
-            }
-            for (yv, _) in &y_ticks {
-                segs.push([vxmin as f32, *yv as f32]);
-                segs.push([vxmax as f32, *yv as f32]);
-            }
-            let grid = GridGpuData {
-                segments: segs,
-                color: [0.45, 0.47, 0.55, 0.22],
-                line_width: 1.0,
+            // Panels: overlay/normalized → 1 panel (all series); stacked → 1 per series.
+            let (n, panel_h) = match lay {
+                Layout::Stacked => {
+                    let n = sdata.len().max(1) as u32;
+                    (n, (h / n).max(60))
+                }
+                _ => (1u32, h),
             };
+            let normalize = lay == Layout::Normalized;
+            let mut panels: Vec<(Vec<SeriesGpuData>, GridGpuData, PlotUniforms)> = Vec::new();
+            if lay == Layout::Stacked {
+                for sd in &sdata {
+                    panels.push(build_panel(
+                        std::slice::from_ref(sd),
+                        x_view,
+                        w,
+                        panel_h,
+                        g.draw_mode,
+                        false,
+                    ));
+                }
+            } else {
+                panels.push(build_panel(&sdata, x_view, w, panel_h, g.draw_mode, normalize));
+            }
+            let out_h = panel_h * n;
 
-            let uniforms = PlotUniforms {
-                view_min: [vxmin as f32, vymin as f32],
-                view_max: [vxmax as f32, vymax as f32],
-                resolution: [w as f32, h as f32],
-                line_width: 2.0,
-                point_radius: 3.0,
-                color: [0.0, 0.0, 0.0, 0.0],
-                _padding: [0.0; 4],
-            };
-
-            // Text companion: ranges, major tick labels, and the legend (so the
-            // scales are readable even though the GPU layer draws no tick text).
-            let x_tick_labels: Vec<String> = x_ticks
+            // Text companion.
+            let x_ticks: Vec<String> = compute_grid_lines(x_view.0, x_view.1)
                 .iter()
-                .filter(|(_, major)| *major)
+                .filter(|(_, m)| *m)
                 .map(|(v, _)| format_tick_value(*v))
                 .collect();
-            let y_tick_labels: Vec<String> = y_ticks
+            let legend: Vec<serde_json::Value> = sdata
                 .iter()
-                .filter(|(_, major)| *major)
-                .map(|(v, _)| format_tick_value(*v))
-                .collect();
-            let legend: Vec<serde_json::Value> = g
-                .y_cols
-                .iter()
-                .enumerate()
-                .map(|(k, &yc)| {
-                    let c = PALETTE[k % PALETTE.len()];
+                .map(|sd| {
+                    let c = sd.color;
                     json!({
-                        "series": ds.data.columns[yc],
+                        "series": sd.name,
+                        "y_range": [sd.ymin, sd.ymax],
                         "color_rgb": [(c[0]*255.0) as u8, (c[1]*255.0) as u8, (c[2]*255.0) as u8],
                     })
                 })
                 .collect();
+            let note = match lay {
+                Layout::Stacked => "Stacked: each series in its own panel (top→bottom) with its own Y axis, sharing X.",
+                Layout::Normalized => "Normalized: each series rescaled to 0..1 so shapes are comparable regardless of scale.",
+                Layout::Overlay => "Overlay: all series share one Y axis (a large-scale series can dwarf a small one).",
+            };
             let text = json!({
                 "title": g.title.clone(),
+                "layout": lay.as_str(),
                 "x_axis": ds.data.columns[g.x_col].clone(),
                 "x_range": [xmin, xmax],
-                "x_ticks": x_tick_labels,
-                "y_range": [ymin, ymax],
-                "y_ticks": y_tick_labels,
-                "legend": legend,
-                "size": [w, h],
-                "note": "PNG shows the plotted series + grid; axis tick labels are in x_ticks/y_ticks.",
+                "x_ticks": x_ticks,
+                "series": legend,
+                "size": [w, out_h],
+                "note": note,
             })
             .to_string();
 
-            (series, grid, uniforms, w, h, text)
+            let clear = [0.055_f64, 0.059, 0.075, 1.0];
+            (panels, w, panel_h, out_h, clear, text)
         };
 
         // Render off the lock, on a blocking thread (GPU read-back blocks).
-        let clear = [0.055_f64, 0.059, 0.075, 1.0];
         let rgba = tokio::task::spawn_blocking(move || {
-            pollster::block_on(async {
-                let r = PlotRenderer::new_offscreen(w, h).await;
-                let calls = r.build_draw_calls(&series, &grid, uniforms);
-                r.render_to_rgba(&calls, clear)
+            pollster::block_on(async move {
+                let r = PlotRenderer::new_offscreen(panel_w, panel_h).await;
+                if panels.len() == 1 {
+                    let (series, grid, uniforms) = &panels[0];
+                    let calls = r.build_draw_calls(series, grid, *uniforms);
+                    r.render_to_rgba(&calls, clear)
+                } else {
+                    // Stacked: render each panel, composite vertically into one image.
+                    let cb = [
+                        (clear[0] * 255.0) as u8,
+                        (clear[1] * 255.0) as u8,
+                        (clear[2] * 255.0) as u8,
+                        255u8,
+                    ];
+                    let row_bytes = (panel_w * 4) as usize;
+                    let mut composite: Vec<u8> = Vec::with_capacity((panel_w * out_h * 4) as usize);
+                    for _ in 0..(panel_w * out_h) {
+                        composite.extend_from_slice(&cb);
+                    }
+                    for (i, (series, grid, uniforms)) in panels.iter().enumerate() {
+                        let calls = r.build_draw_calls(series, grid, *uniforms);
+                        let prgba = r.render_to_rgba(&calls, clear);
+                        let y0 = i as u32 * panel_h;
+                        for row in 0..panel_h {
+                            let src = (row * panel_w * 4) as usize;
+                            let dst = ((y0 + row) * panel_w * 4) as usize;
+                            composite[dst..dst + row_bytes]
+                                .copy_from_slice(&prgba[src..src + row_bytes]);
+                        }
+                        // Thin separator between panels (not after the last).
+                        if i + 1 < panels.len() {
+                            let sy = y0 + panel_h - 1;
+                            let base = (sy * panel_w * 4) as usize;
+                            for px in 0..panel_w as usize {
+                                let o = base + px * 4;
+                                composite[o..o + 4].copy_from_slice(&[90, 94, 104, 255]);
+                            }
+                        }
+                    }
+                    composite
+                }
             })
         })
         .await
         .map_err(|e| McpError::internal_error(format!("render task failed: {e}"), None))?;
 
         // Encode PNG → base64 → image content.
-        let img = image::RgbaImage::from_raw(w, h, rgba)
-            .ok_or_else(|| McpError::internal_error("render produced a mis-sized buffer".to_string(), None))?;
+        let img = image::RgbaImage::from_raw(panel_w, out_h, rgba).ok_or_else(|| {
+            McpError::internal_error("render produced a mis-sized buffer".to_string(), None)
+        })?;
         let mut png: Vec<u8> = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .map_err(|e| McpError::internal_error(format!("PNG encode failed: {e}"), None))?;
@@ -541,6 +619,103 @@ impl OxidePlot {
             Content::text(text),
         ]))
     }
+}
+
+/// One series' finite points + colour + its own y-range (input to `build_panel`).
+struct PanelSeries {
+    name: String,
+    color: [f32; 4],
+    points: Vec<[f32; 2]>,
+    ymin: f64,
+    ymax: f64,
+}
+
+/// Build the (series, grid, uniforms) for one panel over the shared `x_view`.
+/// When `normalize`, each series' y is rescaled to 0..1 (its own range) and the
+/// y-view is fixed to [-0.05, 1.05]; otherwise the y-view fits the panel's data.
+fn build_panel(
+    series: &[PanelSeries],
+    x_view: (f64, f64),
+    w: u32,
+    h: u32,
+    draw_mode: DrawMode,
+    normalize: bool,
+) -> (Vec<SeriesGpuData>, GridGpuData, PlotUniforms) {
+    let (y_view, gpu_series): ((f64, f64), Vec<SeriesGpuData>) = if normalize {
+        let s = series
+            .iter()
+            .map(|sd| {
+                let range = (sd.ymax - sd.ymin).max(1e-12);
+                let pts: Vec<[f32; 2]> = sd
+                    .points
+                    .iter()
+                    .map(|[x, y]| [*x, ((*y as f64 - sd.ymin) / range) as f32])
+                    .collect();
+                SeriesGpuData {
+                    points: pts,
+                    color: sd.color,
+                    line_width: 2.0,
+                    point_radius: 3.0,
+                    draw_mode,
+                }
+            })
+            .collect();
+        ((-0.05, 1.05), s)
+    } else {
+        let mut ymn = f64::INFINITY;
+        let mut ymx = f64::NEG_INFINITY;
+        for sd in series {
+            if sd.ymin.is_finite() {
+                ymn = ymn.min(sd.ymin);
+            }
+            if sd.ymax.is_finite() {
+                ymx = ymx.max(sd.ymax);
+            }
+        }
+        if !ymn.is_finite() || !ymx.is_finite() {
+            ymn = 0.0;
+            ymx = 1.0;
+        }
+        let ypad = ((ymx - ymn) * 0.05).max(1e-9);
+        let s = series
+            .iter()
+            .map(|sd| SeriesGpuData {
+                points: sd.points.clone(),
+                color: sd.color,
+                line_width: 2.0,
+                point_radius: 3.0,
+                draw_mode,
+            })
+            .collect();
+        ((ymn - ypad, ymx + ypad), s)
+    };
+
+    let x_ticks = compute_grid_lines(x_view.0, x_view.1);
+    let y_ticks = compute_grid_lines(y_view.0, y_view.1);
+    let mut segs: Vec<[f32; 2]> = Vec::new();
+    for (xv, _) in &x_ticks {
+        segs.push([*xv as f32, y_view.0 as f32]);
+        segs.push([*xv as f32, y_view.1 as f32]);
+    }
+    for (yv, _) in &y_ticks {
+        segs.push([x_view.0 as f32, *yv as f32]);
+        segs.push([x_view.1 as f32, *yv as f32]);
+    }
+    let grid = GridGpuData {
+        segments: segs,
+        color: [0.45, 0.47, 0.55, 0.22],
+        line_width: 1.0,
+    };
+    let uniforms = PlotUniforms {
+        view_min: [x_view.0 as f32, y_view.0 as f32],
+        view_max: [x_view.1 as f32, y_view.1 as f32],
+        resolution: [w as f32, h as f32],
+        line_width: 2.0,
+        point_radius: 3.0,
+        color: [0.0, 0.0, 0.0, 0.0],
+        _padding: [0.0; 4],
+    };
+    (gpu_series, grid, uniforms)
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
