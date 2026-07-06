@@ -270,6 +270,27 @@ struct CorrelateParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DeriveParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// Operation: "magnitude" (sqrt of sum of squares), "add", "mean", "subtract"
+    /// (A−B), "ratio" (A/B), or "scale" (scale·col + offset).
+    op: String,
+    /// Source columns (names or indices). magnitude/add/mean take one or more;
+    /// subtract/ratio take exactly two; scale takes exactly one.
+    columns: Vec<String>,
+    /// Name for the new column (defaults to op + source names).
+    #[serde(default)]
+    new_name: Option<String>,
+    /// For "scale": the multiplier (default 1).
+    #[serde(default)]
+    scale: Option<f64>,
+    /// For "scale": the offset (default 0).
+    #[serde(default)]
+    offset: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct QueryParams {
     /// Dataset id returned by load_csv.
     dataset_id: String,
@@ -579,6 +600,105 @@ impl OxidePlot {
             out["matrix"] = json!(matrix);
         }
         Ok(Self::text_result(out))
+    }
+
+    #[tool(
+        description = "Add a computed column to a dataset. op: 'magnitude' (sqrt of sum of squares, e.g. accel magnitude from x/y/z), 'add' or 'mean' (of >=1 columns), 'subtract' (A-B) or 'ratio' (A/B) (exactly 2), or 'scale' (scale*col+offset, exactly 1). The new column is usable by describe_data / query_data / create_graph / correlate."
+    )]
+    async fn derive_column(
+        &self,
+        Parameters(DeriveParams {
+            dataset_id,
+            op,
+            columns,
+            new_name,
+            scale,
+            offset,
+        }): Parameters<DeriveParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut s = self.session.lock().await;
+        let ds = s.datasets.get_mut(&dataset_id).ok_or_else(|| {
+            McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+        })?;
+
+        let mut idxs = Vec::new();
+        for c in &columns {
+            idxs.push(resolve_col(&ds.data, c).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown column '{c}'"), None)
+            })?);
+        }
+        match op.as_str() {
+            "subtract" | "ratio" if idxs.len() != 2 => {
+                return Err(McpError::invalid_params(
+                    format!("op '{op}' needs exactly 2 columns"),
+                    None,
+                ))
+            }
+            "scale" if idxs.len() != 1 => {
+                return Err(McpError::invalid_params(
+                    format!("op '{op}' needs exactly 1 column"),
+                    None,
+                ))
+            }
+            "magnitude" | "add" | "mean" if idxs.is_empty() => {
+                return Err(McpError::invalid_params(
+                    format!("op '{op}' needs at least 1 column"),
+                    None,
+                ))
+            }
+            "magnitude" | "add" | "mean" | "subtract" | "ratio" | "scale" => {}
+            other => {
+                return Err(McpError::invalid_params(
+                    format!("unknown op '{other}'"),
+                    None,
+                ))
+            }
+        }
+
+        let cols: Vec<Vec<f64>> = idxs
+            .iter()
+            .map(|&c| column_to_f64(&ds.data.column_data[c]).0)
+            .collect();
+        let n_rows = ds.data.row_count;
+        let a = scale.unwrap_or(1.0);
+        let b = offset.unwrap_or(0.0);
+        let mut vals: Vec<f64> = Vec::with_capacity(n_rows);
+        for r in 0..n_rows {
+            let g = |k: usize| cols[k].get(r).copied().unwrap_or(f64::NAN);
+            let v = match op.as_str() {
+                "magnitude" => (0..cols.len()).map(|k| g(k) * g(k)).sum::<f64>().sqrt(),
+                "add" => (0..cols.len()).map(g).sum(),
+                "mean" => (0..cols.len()).map(g).sum::<f64>() / cols.len() as f64,
+                "subtract" => g(0) - g(1),
+                "ratio" => g(0) / g(1),
+                "scale" => a * g(0) + b,
+                _ => f64::NAN,
+            };
+            vals.push(v);
+        }
+
+        let name = new_name.unwrap_or_else(|| format!("{op}_{}", columns.join("_")));
+        let cells: Vec<String> = vals
+            .iter()
+            .map(|v| if v.is_finite() { format!("{v}") } else { String::new() })
+            .collect();
+        ds.data.columns.push(name.clone());
+        ds.data.column_data.push(cells);
+        ds.numeric_cols.push(true);
+        let new_index = ds.data.columns.len() - 1;
+        let st = SeriesStats::compute(&vals);
+
+        Ok(Self::text_result(json!({
+            "dataset_id": dataset_id,
+            "new_column": name,
+            "index": new_index,
+            "op": op,
+            "from": columns,
+            "n_rows": n_rows,
+            "min": st.as_ref().map(|s| s.min),
+            "max": st.as_ref().map(|s| s.max),
+            "mean": st.as_ref().map(|s| s.mean),
+        })))
     }
 
     #[tool(
