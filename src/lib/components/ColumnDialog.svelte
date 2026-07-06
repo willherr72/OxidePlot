@@ -51,6 +51,29 @@
 
   // When X selection changes, deselect that column from Y.
   $: ySelected = ySelected.map((v, i) => (i === xCol ? false : v));
+
+  // ── Column search / bulk-select (helps with wide datasets) ──────────────────
+  let search = '';
+
+  /** True when a column matches the current search filter (case-insensitive). */
+  function matches(col: { name: string }): boolean {
+    const q = search.trim().toLowerCase();
+    return q === '' || col.name.toLowerCase().includes(q);
+  }
+
+  /** Select every currently-visible, eligible column for Y. */
+  function selectAllVisible() {
+    ySelected = ySelected.map((v, i) =>
+      matches(meta.columns[i]) && i !== xCol && meta.columns[i].kind !== 'text' ? true : v
+    );
+  }
+
+  /** Clear Y selection for every currently-visible column. */
+  function clearAllVisible() {
+    ySelected = ySelected.map((v, i) => (matches(meta.columns[i]) ? false : v));
+  }
+
+  $: yCount = ySelected.filter((v, i) => v && i !== xCol).length;
 </script>
 
 <div class="overlay">
@@ -58,45 +81,63 @@
     <h2>Choose Columns</h2>
     <p class="subtitle">{meta.rows} rows · {meta.columns.length} columns</p>
 
+    <input
+      class="col-search"
+      type="text"
+      placeholder="Filter columns…"
+      bind:value={search}
+      aria-label="Filter columns"
+    />
+
     <div class="section">
       <label class="section-title">X Axis (time or index)</label>
       <div class="col-list">
         {#each meta.columns as col, i}
-          <label class="col-row" class:selected={xCol === i} class:disabled={col.kind === 'text'}>
-            <input
-              type="radio"
-              name="x_col"
-              value={i}
-              bind:group={xCol}
-              disabled={col.kind === 'text'}
-            />
-            <span class="col-name">{col.name}</span>
-            <span class="col-kind kind-{col.kind}">{col.kind}</span>
-          </label>
+          {#if matches(col)}
+            <label class="col-row" class:selected={xCol === i} class:disabled={col.kind === 'text'}>
+              <input
+                type="radio"
+                name="x_col"
+                value={i}
+                bind:group={xCol}
+                disabled={col.kind === 'text'}
+              />
+              <span class="col-name">{col.name}</span>
+              <span class="col-kind kind-{col.kind}">{col.kind}</span>
+            </label>
+          {/if}
         {/each}
       </div>
     </div>
 
     <div class="section">
-      <label class="section-title">Y Axis (one or more)</label>
+      <div class="section-head">
+        <label class="section-title">Y Axis · {yCount} selected</label>
+        <span class="yctl">
+          <button type="button" class="mini-btn" on:click={selectAllVisible}>All</button>
+          <button type="button" class="mini-btn" on:click={clearAllVisible}>None</button>
+        </span>
+      </div>
       <div class="col-list">
         {#each meta.columns as col, i}
-          <label class="col-row" class:disabled={i === xCol || col.kind === 'text'}>
-            <input
-              type="checkbox"
-              bind:checked={ySelected[i]}
-              disabled={i === xCol || col.kind === 'text'}
-            />
-            <span class="col-name">{col.name}</span>
-            <span class="col-kind kind-{col.kind}">{col.kind}</span>
-          </label>
+          {#if matches(col)}
+            <label class="col-row" class:disabled={i === xCol || col.kind === 'text'}>
+              <input
+                type="checkbox"
+                bind:checked={ySelected[i]}
+                disabled={i === xCol || col.kind === 'text'}
+              />
+              <span class="col-name">{col.name}</span>
+              <span class="col-kind kind-{col.kind}">{col.kind}</span>
+            </label>
+          {/if}
         {/each}
       </div>
     </div>
 
     <div class="actions">
       <button class="btn-cancel" on:click={onCancel}>Cancel</button>
-      <button class="btn-confirm" on:click={onConfirm}>Plot</button>
+      <button class="btn-confirm" on:click={onConfirm}>Plot{yCount > 0 ? ` (${yCount})` : ''}</button>
     </div>
   </div>
 </div>
@@ -117,11 +158,64 @@
     border: 1px solid var(--border-mid);
     border-radius: 10px;
     padding: 24px 28px;
-    min-width: 360px;
-    max-width: 520px;
+    width: min(92vw, 640px);
+    max-height: 90vh;
+    overflow-y: auto;
     color: var(--dialog-text);
     font-family: var(--font-ui);
     box-shadow: var(--shadow-panel);
+  }
+
+  .col-search {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 16px;
+    padding: 9px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border-mid);
+    border-radius: var(--radius-sm);
+    color: var(--dialog-text);
+    font-family: var(--font-ui);
+    font-size: 0.85rem;
+    outline: none;
+  }
+  .col-search:focus {
+    border-color: var(--accent);
+  }
+  .col-search::placeholder {
+    color: var(--text-muted);
+  }
+
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .section-head .section-title {
+    margin-bottom: 0;
+  }
+  .yctl {
+    display: flex;
+    gap: 6px;
+  }
+  .mini-btn {
+    padding: 3px 10px;
+    font-family: var(--font-ui);
+    font-size: 0.66rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--btn-cancel-bg);
+    color: var(--btn-cancel-text);
+    border: 1px solid var(--border-mid);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .mini-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    opacity: 1;
   }
 
   h2 {
@@ -156,9 +250,10 @@
   .col-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    max-height: 180px;
+    gap: 3px;
+    max-height: 244px;
     overflow-y: auto;
+    padding-right: 4px;
   }
 
   .col-row {

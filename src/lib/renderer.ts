@@ -204,6 +204,14 @@ export class Renderer {
   }
 
   /**
+   * Remove all series from the plot and re-render (empty state).
+   */
+  clearSeries(): void {
+    this.assertPlot();
+    (this.plot as any).clear_series();
+  }
+
+  /**
    * Move the series at `from` to position `to` (reorders z-order) and re-render.
    */
   moveSeries(from: number, to: number): void {

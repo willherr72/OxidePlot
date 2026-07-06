@@ -448,6 +448,9 @@ mod wasm_impl {
             let mut x_max = f64::NEG_INFINITY;
 
             for s in &self.sources {
+                if !s.visible {
+                    continue; // fit to what's shown, not hidden series
+                }
                 for &x in s.xs.iter() {
                     if x.is_finite() {
                         x_min = x_min.min(x);
@@ -477,6 +480,9 @@ mod wasm_impl {
                 let mut y_max = f64::NEG_INFINITY;
 
                 for s in &self.sources {
+                    if !s.visible {
+                        continue; // fit to what's shown, not hidden series
+                    }
                     for &y in s.ys.iter() {
                         if y.is_finite() {
                             y_min = y_min.min(y);
@@ -708,6 +714,14 @@ mod wasm_impl {
                 return;
             }
             self.sources.remove(index);
+            self.rebuild_visible();
+            self.render();
+        }
+
+        /// Remove ALL series from this graph and re-render (returns to empty state).
+        #[wasm_bindgen]
+        pub fn clear_series(&mut self) {
+            self.sources.clear();
             self.rebuild_visible();
             self.render();
         }

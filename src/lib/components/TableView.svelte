@@ -435,13 +435,30 @@
     border-right: 1px solid var(--border);
     display: flex;
     align-items: center;
-    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-family: var(--font-data);
     font-size: 0.78rem;
     color: var(--text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     box-sizing: border-box;
+  }
+
+  /* Freeze the first column (timestamp / index) as a horizontal-scroll anchor
+     so you never lose which row is which across many columns. */
+  .th:first-child,
+  .td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    background: var(--panel-bg);
+    border-right: 2px solid var(--border-mid);
+  }
+  .data-row.even .td:first-child {
+    background: color-mix(in srgb, var(--panel-bg) 50%, var(--bg) 50%);
+  }
+  .thead .th:first-child {
+    z-index: 20;
   }
 
   .td.numeric {

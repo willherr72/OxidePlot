@@ -294,6 +294,15 @@
     refreshView();
   }
 
+  /** Remove all series from this graph (Clear button) → returns to empty state. */
+  export function clear(): void {
+    renderer.clearSeries();
+    hasData = false;
+    cursors = [];
+    refreshSeriesInfo();
+    pullViewState();
+  }
+
   /** Cycle draw mode: lines → step → points. No-op without data. */
   export function cycleDrawMode(): void {
     if (!hasData) return;

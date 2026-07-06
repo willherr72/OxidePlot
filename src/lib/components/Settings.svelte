@@ -107,7 +107,7 @@
   .settings-panel {
     position: absolute;
     top: 8px;
-    right: 8px;
+    left: 8px;
     z-index: 100;
     background: var(--panel-bg);
     border: 1px solid var(--border-mid);
