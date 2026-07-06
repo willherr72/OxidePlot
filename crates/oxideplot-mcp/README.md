@@ -15,10 +15,24 @@ stdio, so it plugs into Claude Code, Claude Desktop, or any MCP client.
 | `describe_data` | Per-column statistics (count, min, max, mean, median, std, peak-to-peak) |
 | `query_data` | A page of raw rows, with sort / case-insensitive search / paging |
 | `create_graph` | Pick X + one-or-more Y columns (by name or index) → `graph_id` |
-| `render_graph` | Render the graph to a **PNG image** + a text block (axis ranges, tick labels, legend) |
+| `render_graph` | Render the graph to a **PNG image** (with baked axis tick labels) + a text block (ranges, ticks, legend) |
 
 The intended loop: `load_csv → describe_data` / `query_data` (understand) →
 `create_graph → render_graph` (see it) → refine.
+
+### Render options (`create_graph` / `render_graph`)
+
+- **`layout`** — `overlay` (shared Y, default), `normalized` (each series rescaled
+  0–1 to compare shapes), or `stacked` (one panel per series with its own Y axis,
+  sharing X — best when scales differ, e.g. temperature vs pressure).
+- **`transform`** (+ `transform_window`) — `moving_average` (smoothing),
+  `derivative` (dy/dx), or `integral`, applied to every Y series before plotting.
+- **`draw_mode`** — `lines` (default), `step`, or `points`.
+
+`render_graph` accepts `layout` / `transform` overrides to re-render the same
+graph differently. Large series are automatically LTTB-downsampled to ~2×width for
+the render (so multi-million-row files render fast) — the text reports
+`points_per_series` and `downsampled_for_render`.
 
 ## Build
 
@@ -65,9 +79,9 @@ Restart Claude Desktop; the OxidePlot tools appear under the 🔌 menu.
   pass absolute file paths.
 - **Session state:** datasets and graphs live in memory for the life of the
   server process (ids like `ds-1`, `gr-2`).
-- **Axis labels:** the rendered PNG shows the series + grid; the exact tick
-  labels and ranges come back in the text companion. (Baking tick labels into
-  the image is a planned enhancement.)
+- **Axis labels:** numeric tick labels are drawn onto the PNG (per panel). The
+  title and series legend come back in the text companion (they'd need a full
+  letterform font to bake into the image).
 
 ## Verify without a client
 
