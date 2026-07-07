@@ -282,6 +282,33 @@ export class Renderer {
   }
 
   /**
+   * Set the autoscale mode used when auto-fitting the view.
+   * @param mode - one of 'minmax' or 'robust'
+   */
+  setAutoscaleMode(mode: string): void {
+    this.assertPlot();
+    (this.plot as any).set_autoscale_mode(mode);
+  }
+
+  /**
+   * Set the Y-axis scale.
+   * @param mode - one of 'linear' or 'log'
+   */
+  setYScale(mode: string): void {
+    this.assertPlot();
+    (this.plot as any).set_y_scale(mode);
+  }
+
+  /**
+   * Set the downsampling mode used when rendering large series.
+   * @param mode - one of 'minmax', 'lttb', or 'none'
+   */
+  setDownsampleMode(mode: string): void {
+    this.assertPlot();
+    (this.plot as any).set_downsample_mode(mode);
+  }
+
+  /**
    * Append a derived series built from a math transform of the source at `sourceIndex`.
    *
    * `kind` — one of `'moving_average'`, `'derivative'`, `'integral'`,

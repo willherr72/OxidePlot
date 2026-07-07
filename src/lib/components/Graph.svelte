@@ -57,6 +57,9 @@
   let lineWidth = 2.0;
   let pointRadius = 3.0;
   let normalized = false;
+  let autoscaleMode = 'minmax';
+  let yScale = 'linear';
+  let downsampleMode = 'minmax';
 
   // ── View mode (plot / table) ────────────────────────────────────────────────
   let viewMode: 'plot' | 'table' = 'plot';
@@ -353,6 +356,27 @@
     refreshView();
   }
 
+  /** Set autoscale mode used when auto-fitting the view (Settings panel). */
+  export function setAutoscaleMode(v: string): void {
+    autoscaleMode = v;
+    try { renderer.setAutoscaleMode(v); } catch (_) {}
+    refreshView();
+  }
+
+  /** Set the Y-axis scale (Settings panel). */
+  export function setYScale(v: string): void {
+    yScale = v;
+    try { renderer.setYScale(v); } catch (_) {}
+    refreshView();
+  }
+
+  /** Set the downsampling mode used when rendering large series (Settings panel). */
+  export function setDownsampleMode(v: string): void {
+    downsampleMode = v;
+    try { renderer.setDownsampleMode(v); } catch (_) {}
+    refreshView();
+  }
+
   /** Apply a WebGPU background color (theme) and re-render. */
   export function setBackground(r: number, g: number, b: number, a: number, renderNow = true): void {
     try {
@@ -418,6 +442,9 @@
   export function getLineWidth(): number { return lineWidth; }
   export function getPointRadius(): number { return pointRadius; }
   export function getNormalized(): boolean { return normalized; }
+  export function getAutoscaleMode(): string { return autoscaleMode; }
+  export function getYScale(): string { return yScale; }
+  export function getDownsampleMode(): string { return downsampleMode; }
 </script>
 
 <!-- Table view — rendered alongside (not replacing) the canvas -->
