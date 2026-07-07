@@ -68,7 +68,9 @@
   let tableView: TableView;
   let distView: DistView;
 
-  // ── Selected series (drives the single-series Distribution view) ────────────
+  // ── Selected series (SeriesList row selection; Dist now shows all series as
+  //    small multiples and no longer depends on this — kept for a future
+  //    single-series view, e.g. Spectrogram) ────────────────────────────────
   let selectedSeriesIndex = 0;
 
   // ── Draw mode ────────────────────────────────────────────────────────────────
@@ -498,7 +500,7 @@
 {#if hasData && viewMode === 'table'}
   <TableView bind:this={tableView} {renderer} />
 {:else if hasData && viewMode === 'dist'}
-  <DistView bind:this={distView} {renderer} seriesIndex={selectedSeriesIndex} />
+  <DistView bind:this={distView} {renderer} />
 {/if}
 
 <!-- Plot canvas + axis overlay — fills the remaining space; hidden (not unmounted) outside plot mode -->
