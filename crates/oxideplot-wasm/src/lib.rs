@@ -88,6 +88,17 @@ mod wasm_impl {
         points: Option<usize>,
     }
 
+    /// Return payload for `series_histogram`: the binned distribution of a
+    /// source series' finite Y values.
+    #[derive(serde::Serialize)]
+    struct HistogramData {
+        counts: Vec<usize>,
+        bin_centers: Vec<f64>,
+        min: f64,
+        max: f64,
+        n: usize,
+    }
+
     /// The colour palette used by `ColumnDialog` on the JS side.
     /// `add_transform` picks from this palette by series count so derived
     /// series blend visually with the source series.
@@ -810,6 +821,30 @@ mod wasm_impl {
             self.sources.insert(adjusted_to, src);
             self.rebuild_visible();
             self.render();
+        }
+
+        /// Return the histogram of the source series at `source_index` as
+        /// `{ counts, bin_centers, min, max, n }`.
+        ///
+        /// `nbins` is clamped to `[2, 200]` by the core `histogram` function.
+        /// Throws (JS exception) if `source_index` is out of range or the
+        /// series has fewer than 2 finite values.
+        #[wasm_bindgen]
+        pub fn series_histogram(&self, source_index: usize, nbins: usize) -> Result<JsValue, JsValue> {
+            let src = self
+                .sources
+                .get(source_index)
+                .ok_or_else(|| JsValue::from_str("source index out of range"))?;
+            let h = oxideplot_core::processing::histogram::histogram(&src.ys, nbins)
+                .ok_or_else(|| JsValue::from_str("not enough finite values for a histogram"))?;
+            let data = HistogramData {
+                counts: h.counts,
+                bin_centers: h.bin_centers,
+                min: h.min,
+                max: h.max,
+                n: h.n,
+            };
+            serde_wasm_bindgen::to_value(&data).map_err(|e| JsValue::from_str(&e.to_string()))
         }
 
         // ── Appearance settings ───────────────────────────────────────────────
