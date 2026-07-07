@@ -116,11 +116,12 @@ impl DownsampleMode {
 
 /// Like `downsample_for_view`, but selects the decimation strategy.
 ///
-/// Windows to the exact visible X range `[view_min, view_max]` using the same
-/// `partition_point` binary search `downsample_for_view` uses, but WITHOUT that
-/// function's extra ±1 line-continuity padding: `None` mode must return exactly
-/// the in-range slice (see `none_returns_windowed_slice_untouched` below), so the
-/// bounds here are `lo = partition_point(v < view_min)`, `hi = partition_point(v <= view_max)`.
+/// The visible-X window is computed IDENTICALLY to `downsample_for_view`: the same
+/// `partition_point` bounds PLUS the ±1 line-continuity padding
+/// (`saturating_sub(1)` on the low end, `+ 1` clamped to `len` on the high end) so
+/// a line segment crossing into the view from off-screen still draws. This must be
+/// byte-identical to `downsample_for_view` because Task 3 swaps the renderer's call
+/// site to this function.
 pub fn downsample_for_view_mode(
     x: &[f64],
     y: &[f64],
@@ -129,9 +130,16 @@ pub fn downsample_for_view_mode(
     max_points: usize,
     mode: DownsampleMode,
 ) -> (Vec<f64>, Vec<f64>) {
-    let lo = x.partition_point(|&v| v < view_min);
-    let hi = x.partition_point(|&v| v <= view_max);
-    let (xw, yw) = (&x[lo..hi], &y[lo..hi]);
+    if x.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    // Same visible window as downsample_for_view, including the ±1 continuity padding.
+    let start = x.partition_point(|&v| v < view_min).saturating_sub(1);
+    let end = (x.partition_point(|&v| v <= view_max) + 1).min(x.len());
+    let xw = &x[start..end];
+    let yw = &y[start..end];
+
     if xw.len() <= max_points || max_points < 3 {
         return (xw.to_vec(), yw.to_vec());
     }
@@ -260,11 +268,12 @@ mod ds_mode_tests {
     #[test]
     fn none_returns_windowed_slice_untouched() {
         let (x, y) = ramp(1000);
-        // window to x in [100, 200] → 101 points, no decimation
+        // window to x in [100, 200] → 101 in-range points, PLUS downsample_for_view's
+        // ±1 line-continuity padding on each edge → x in [99, 201], 103 points, no decimation.
         let (ox, _) = downsample_for_view_mode(&x, &y, 100.0, 200.0, 50, DownsampleMode::None);
-        assert_eq!(ox.first().copied(), Some(100.0));
-        assert_eq!(ox.last().copied(), Some(200.0));
-        assert_eq!(ox.len(), 101);
+        assert_eq!(ox.first().copied(), Some(99.0));
+        assert_eq!(ox.last().copied(), Some(201.0));
+        assert_eq!(ox.len(), 103);
     }
 
     #[test]
