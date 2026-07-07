@@ -312,3 +312,35 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+/// Resolve a column reference (name or numeric index string) to a column index.
+pub fn resolve_col(data: &LoadedData, spec: &str) -> Option<usize> {
+    if let Ok(i) = spec.parse::<usize>() {
+        if i < data.columns.len() {
+            return Some(i);
+        }
+    }
+    data.columns.iter().position(|c| c == spec)
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    fn ld() -> LoadedData {
+        LoadedData {
+            columns: vec!["time".into(), "temp".into(), "pressure".into()],
+            column_data: vec![vec![], vec![], vec![]],
+            row_count: 0,
+        }
+    }
+
+    #[test]
+    fn resolve_by_name_and_index() {
+        let d = ld();
+        assert_eq!(resolve_col(&d, "temp"), Some(1));
+        assert_eq!(resolve_col(&d, "2"), Some(2));
+        assert_eq!(resolve_col(&d, "nope"), None);
+        assert_eq!(resolve_col(&d, "9"), None); // out of range
+    }
+}
