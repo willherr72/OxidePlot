@@ -194,12 +194,25 @@ fn heat_color(t: f64) -> [u8; 3] {
 // functions: sqrt abs sin cos tan asin acos atan atan2 hypot pow exp ln log10
 // log floor ceil round sign deg rad min max.
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Rel {
+    Gt,
+    Lt,
+    Ge,
+    Le,
+    Eq,
+    Ne,
+}
+
 #[derive(Clone)]
 enum Ast {
     Num(f64),
     Col(usize),
     Neg(Box<Ast>),
     Bin(char, Box<Ast>, Box<Ast>),
+    Cmp(Rel, Box<Ast>, Box<Ast>),
+    And(Box<Ast>, Box<Ast>),
+    Or(Box<Ast>, Box<Ast>),
     Func(String, Vec<Ast>),
 }
 
@@ -208,6 +221,9 @@ enum Tok {
     Num(f64),
     Ident(String),
     Op(char),
+    Cmp(Rel),
+    And,
+    Or,
     LParen,
     RParen,
     Comma,
@@ -245,16 +261,65 @@ fn tokenize_expr(s: &str) -> Result<Vec<Tok>, String> {
             while i < b.len() && ((b[i] as char).is_alphanumeric() || b[i] == b'_') {
                 i += 1;
             }
-            toks.push(Tok::Ident(s[start..i].to_string()));
+            let word = &s[start..i];
+            match word.to_ascii_lowercase().as_str() {
+                "and" => toks.push(Tok::And),
+                "or" => toks.push(Tok::Or),
+                _ => toks.push(Tok::Ident(word.to_string())),
+            }
         } else {
+            let next = if i + 1 < b.len() { b[i + 1] as char } else { '\0' };
             match c {
-                '+' | '-' | '*' | '/' | '^' => toks.push(Tok::Op(c)),
-                '(' => toks.push(Tok::LParen),
-                ')' => toks.push(Tok::RParen),
-                ',' => toks.push(Tok::Comma),
+                '+' | '-' | '*' | '/' | '^' => {
+                    toks.push(Tok::Op(c));
+                    i += 1;
+                }
+                '>' if next == '=' => {
+                    toks.push(Tok::Cmp(Rel::Ge));
+                    i += 2;
+                }
+                '<' if next == '=' => {
+                    toks.push(Tok::Cmp(Rel::Le));
+                    i += 2;
+                }
+                '=' if next == '=' => {
+                    toks.push(Tok::Cmp(Rel::Eq));
+                    i += 2;
+                }
+                '!' if next == '=' => {
+                    toks.push(Tok::Cmp(Rel::Ne));
+                    i += 2;
+                }
+                '>' => {
+                    toks.push(Tok::Cmp(Rel::Gt));
+                    i += 1;
+                }
+                '<' => {
+                    toks.push(Tok::Cmp(Rel::Lt));
+                    i += 1;
+                }
+                '&' if next == '&' => {
+                    toks.push(Tok::And);
+                    i += 2;
+                }
+                '|' if next == '|' => {
+                    toks.push(Tok::Or);
+                    i += 2;
+                }
+                '(' => {
+                    toks.push(Tok::LParen);
+                    i += 1;
+                }
+                ')' => {
+                    toks.push(Tok::RParen);
+                    i += 1;
+                }
+                ',' => {
+                    toks.push(Tok::Comma);
+                    i += 1;
+                }
                 _ => return Err(format!("unexpected character '{c}'")),
             }
-            i += 1;
         }
     }
     Ok(toks)
@@ -276,11 +341,38 @@ impl ExprParser<'_> {
         t
     }
     fn parse(&mut self) -> Result<Ast, String> {
-        let e = self.add_sub()?;
+        let e = self.or_expr()?;
         if self.pos != self.toks.len() {
             return Err("trailing tokens in expression".to_string());
         }
         Ok(e)
+    }
+    fn or_expr(&mut self) -> Result<Ast, String> {
+        let mut left = self.and_expr()?;
+        while let Some(Tok::Or) = self.peek() {
+            self.pos += 1;
+            let right = self.and_expr()?;
+            left = Ast::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+    fn and_expr(&mut self) -> Result<Ast, String> {
+        let mut left = self.rel_expr()?;
+        while let Some(Tok::And) = self.peek() {
+            self.pos += 1;
+            let right = self.rel_expr()?;
+            left = Ast::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+    fn rel_expr(&mut self) -> Result<Ast, String> {
+        let left = self.add_sub()?;
+        if let Some(Tok::Cmp(rel)) = self.peek().cloned() {
+            self.pos += 1;
+            let right = self.add_sub()?;
+            return Ok(Ast::Cmp(rel, Box::new(left), Box::new(right)));
+        }
+        Ok(left)
     }
     fn add_sub(&mut self) -> Result<Ast, String> {
         let mut left = self.mul_div()?;
@@ -326,7 +418,7 @@ impl ExprParser<'_> {
         match self.bump() {
             Some(Tok::Num(n)) => Ok(Ast::Num(n)),
             Some(Tok::LParen) => {
-                let e = self.add_sub()?;
+                let e = self.or_expr()?;
                 match self.bump() {
                     Some(Tok::RParen) => Ok(e),
                     _ => Err("expected ')'".to_string()),
@@ -338,7 +430,7 @@ impl ExprParser<'_> {
                     let mut args = Vec::new();
                     if !matches!(self.peek(), Some(Tok::RParen)) {
                         loop {
-                            args.push(self.add_sub()?);
+                            args.push(self.or_expr()?);
                             if let Some(Tok::Comma) = self.peek() {
                                 self.pos += 1;
                             } else {
@@ -381,7 +473,7 @@ fn collect_expr_cols(a: &Ast, out: &mut std::collections::HashSet<usize>) {
             out.insert(*ci);
         }
         Ast::Neg(e) => collect_expr_cols(e, out),
-        Ast::Bin(_, l, r) => {
+        Ast::Bin(_, l, r) | Ast::Cmp(_, l, r) | Ast::And(l, r) | Ast::Or(l, r) => {
             collect_expr_cols(l, out);
             collect_expr_cols(r, out);
         }
@@ -409,6 +501,37 @@ fn eval_expr(a: &Ast, cols: &std::collections::HashMap<usize, Vec<f64>>, row: us
                 '/' => a / b,
                 '^' => a.powf(b),
                 _ => f64::NAN,
+            }
+        }
+        Ast::Cmp(rel, l, r) => {
+            let a = eval_expr(l, cols, row);
+            let b = eval_expr(r, cols, row);
+            let t = match rel {
+                Rel::Gt => a > b,
+                Rel::Lt => a < b,
+                Rel::Ge => a >= b,
+                Rel::Le => a <= b,
+                Rel::Eq => a == b,
+                Rel::Ne => a != b,
+            };
+            if t {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Ast::And(l, r) => {
+            if eval_expr(l, cols, row) != 0.0 && eval_expr(r, cols, row) != 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Ast::Or(l, r) => {
+            if eval_expr(l, cols, row) != 0.0 || eval_expr(r, cols, row) != 0.0 {
+                1.0
+            } else {
+                0.0
             }
         }
         Ast::Func(name, args) => {
@@ -442,6 +565,35 @@ fn eval_expr(a: &Ast, cols: &std::collections::HashMap<usize, Vec<f64>>, row: us
             }
         }
     }
+}
+
+/// Escape a CSV field (quote if it contains a comma, quote, or newline).
+fn csv_escape(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Keep the subset of `rows` (row indices) for which the boolean `filter`
+/// expression is true (non-zero and finite). Errors on a bad expression.
+fn apply_filter(data: &LoadedData, rows: &[usize], filter: &str) -> Result<Vec<usize>, String> {
+    let ast = parse_expr(data, filter)?;
+    let mut refs = std::collections::HashSet::new();
+    collect_expr_cols(&ast, &mut refs);
+    let colvals: std::collections::HashMap<usize, Vec<f64>> = refs
+        .iter()
+        .map(|&ci| (ci, column_to_f64(&data.column_data[ci]).0))
+        .collect();
+    Ok(rows
+        .iter()
+        .copied()
+        .filter(|&r| {
+            let v = eval_expr(&ast, &colvals, r);
+            v.is_finite() && v != 0.0
+        })
+        .collect())
 }
 
 /// Trailing-window rolling statistic per row: rolling_mean/std/min/max over cols[0],
@@ -880,12 +1032,33 @@ struct QueryParams {
     /// Case-insensitive substring filter across all columns (optional).
     #[serde(default)]
     search: Option<String>,
+    /// Boolean filter predicate over column names, e.g. "raw_ax2 > 1e6" or
+    /// "total_gravity < 0.5 and vibe_x > 3". Keeps only rows where it is true.
+    /// Operators: > < >= <= == != and/or (&&/||), + - * / ^, plus the math
+    /// functions from derive_column expr.
+    #[serde(default)]
+    filter: Option<String>,
     /// Row offset into the (sorted/filtered) result (default 0).
     #[serde(default)]
     offset: Option<usize>,
     /// Max rows to return (default 20, capped at 200).
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ExportParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// File path to write the CSV to.
+    path: String,
+    /// Columns to include (names or indices). Omit for all columns.
+    #[serde(default)]
+    columns: Option<Vec<String>>,
+    /// Optional boolean filter predicate (same syntax as query_data's 'filter') —
+    /// export only the matching rows.
+    #[serde(default)]
+    filter: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -2000,7 +2173,7 @@ impl OxidePlot {
     }
 
     #[tool(
-        description = "Return a page of raw rows from a dataset, with optional sort (by column name), case-insensitive search, and paging (offset/limit). Use this to inspect actual values."
+        description = "Return a page of raw rows from a dataset, with optional sort (by column name), case-insensitive search, a boolean 'filter' predicate (e.g. \"raw_ax2 > 1e6 and total_gravity < 0.5\") to pull just the matching rows, and paging (offset/limit)."
     )]
     async fn query_data(
         &self,
@@ -2009,6 +2182,7 @@ impl OxidePlot {
             sort_col,
             sort_desc,
             search,
+            filter,
             offset,
             limit,
         }): Parameters<QueryParams>,
@@ -2033,7 +2207,11 @@ impl OxidePlot {
             q.search = term;
         }
 
-        let idx = compute_view_index(&ds.data, &q);
+        let mut idx = compute_view_index(&ds.data, &q);
+        if let Some(pred) = filter.as_deref() {
+            idx = apply_filter(&ds.data, &idx, pred)
+                .map_err(|e| McpError::invalid_params(format!("filter error: {e}"), None))?;
+        }
         let total = idx.len();
         let start = offset.unwrap_or(0);
         let count = limit.unwrap_or(20).min(200);
@@ -2045,6 +2223,71 @@ impl OxidePlot {
             "returned": rows.len(),
             "columns": ds.data.columns,
             "rows": rows,
+        })))
+    }
+
+    #[tool(
+        description = "Export a dataset to a CSV file on disk, optionally a column subset and/or only rows matching a boolean 'filter' predicate (same syntax as query_data). Use to hand off flagged rows or a derived/filtered table as a file. Returns the path and rows written."
+    )]
+    async fn export_csv(
+        &self,
+        Parameters(ExportParams {
+            dataset_id,
+            path,
+            columns,
+            filter,
+        }): Parameters<ExportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let s = self.session.lock().await;
+        let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+            McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+        })?;
+
+        let cidx: Vec<usize> = match &columns {
+            Some(names) => {
+                let mut v = Vec::new();
+                for n in names {
+                    v.push(resolve_col(&ds.data, n).ok_or_else(|| {
+                        McpError::invalid_params(format!("unknown column '{n}'"), None)
+                    })?);
+                }
+                v
+            }
+            None => (0..ds.data.columns.len()).collect(),
+        };
+
+        let all: Vec<usize> = (0..ds.data.row_count).collect();
+        let rows = match filter.as_deref() {
+            Some(pred) => apply_filter(&ds.data, &all, pred)
+                .map_err(|e| McpError::invalid_params(format!("filter error: {e}"), None))?,
+            None => all,
+        };
+
+        let mut out = String::new();
+        out.push_str(
+            &cidx
+                .iter()
+                .map(|&c| csv_escape(&ds.data.columns[c]))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        out.push('\n');
+        for &r in &rows {
+            let line: Vec<String> = cidx
+                .iter()
+                .map(|&c| csv_escape(ds.data.column_data[c].get(r).map(|s| s.as_str()).unwrap_or("")))
+                .collect();
+            out.push_str(&line.join(","));
+            out.push('\n');
+        }
+        std::fs::write(&path, out)
+            .map_err(|e| McpError::internal_error(format!("failed to write '{path}': {e}"), None))?;
+
+        Ok(Self::text_result(json!({
+            "path": path,
+            "rows_written": rows.len(),
+            "columns": cidx.iter().map(|&c| &ds.data.columns[c]).collect::<Vec<_>>(),
+            "filtered": filter.is_some(),
         })))
     }
 
