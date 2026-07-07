@@ -7,12 +7,18 @@
    *   - Point radius (range slider + number, 1–10)
    *   - Grid on/off (checkbox)
    *   - Normalize multi-unit (checkbox)
+   *   - Autoscale mode (select: minmax / robust)
+   *   - Y-scale (select: linear / log)
+   *   - Downsample mode (select: minmax / lttb / none)
    *
    * Emits:
    *   - linewidth: { value: number }
    *   - pointradius: { value: number }
    *   - showgrid: { value: boolean }
    *   - normalized: { value: boolean }
+   *   - autoscalemode: { value: string }
+   *   - yscale: { value: string }
+   *   - downsamplemode: { value: string }
    *
    * Colors use CSS custom properties so the panel responds to data-theme.
    */
@@ -22,12 +28,18 @@
   export let pointRadius: number = 3.0;
   export let showGrid: boolean = true;
   export let normalized: boolean = false;
+  export let autoscaleMode: string = 'minmax';
+  export let yScale: string = 'linear';
+  export let downsampleMode: string = 'minmax';
 
   const dispatch = createEventDispatcher<{
     linewidth: { value: number };
     pointradius: { value: number };
     showgrid: { value: boolean };
     normalized: { value: boolean };
+    autoscalemode: { value: string };
+    yscale: { value: string };
+    downsamplemode: { value: string };
   }>();
 
   function onLineWidthChange() {
@@ -44,6 +56,18 @@
 
   function onNormalizedChange() {
     dispatch('normalized', { value: normalized });
+  }
+
+  function onAutoscaleModeChange(e: Event) {
+    dispatch('autoscalemode', { value: (e.currentTarget as HTMLSelectElement).value });
+  }
+
+  function onYScaleChange(e: Event) {
+    dispatch('yscale', { value: (e.currentTarget as HTMLSelectElement).value });
+  }
+
+  function onDownsampleModeChange(e: Event) {
+    dispatch('downsamplemode', { value: (e.currentTarget as HTMLSelectElement).value });
   }
 </script>
 
@@ -100,6 +124,31 @@
       bind:checked={normalized}
       on:change={onNormalizedChange}
     />
+  </div>
+
+  <div class="setting-row">
+    <label for="autoscale-mode">Autoscale</label>
+    <select id="autoscale-mode" value={autoscaleMode} on:change={onAutoscaleModeChange}>
+      <option value="minmax">Min / Max</option>
+      <option value="robust">Robust</option>
+    </select>
+  </div>
+
+  <div class="setting-row">
+    <label for="y-scale">Y-scale</label>
+    <select id="y-scale" value={yScale} on:change={onYScaleChange}>
+      <option value="linear">Linear</option>
+      <option value="log">Log</option>
+    </select>
+  </div>
+
+  <div class="setting-row">
+    <label for="downsample-mode">Downsample</label>
+    <select id="downsample-mode" value={downsampleMode} on:change={onDownsampleModeChange}>
+      <option value="minmax">Min / Max</option>
+      <option value="lttb">LTTB</option>
+      <option value="none">None</option>
+    </select>
   </div>
 </div>
 
@@ -173,5 +222,21 @@
     accent-color: var(--accent);
     cursor: pointer;
     margin-right: auto;
+  }
+
+  select {
+    flex: 1;
+    background: var(--btn-bg);
+    color: var(--text-dim);
+    border: 1px solid var(--btn-border);
+    border-radius: var(--radius-sm);
+    padding: 3px 6px;
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+
+  select:hover {
+    border-color: var(--border-mid);
   }
 </style>

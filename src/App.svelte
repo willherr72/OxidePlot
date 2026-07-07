@@ -41,6 +41,9 @@
   let lineWidth = 2.0;
   let pointRadius = 3.0;
   let normalized = false;
+  let autoscaleMode = 'minmax';
+  let yScale = 'linear';
+  let downsampleMode = 'minmax';
 
   /** Pull all panel-facing state from the focused graph.
    *  Reads `graphRefs[focusedId]` directly (not the reactive `focusedGraph`
@@ -60,6 +63,9 @@
     lineWidth = g.getLineWidth();
     pointRadius = g.getPointRadius();
     normalized = g.getNormalized();
+    autoscaleMode = g.getAutoscaleMode();
+    yScale = g.getYScale();
+    downsampleMode = g.getDownsampleMode();
     const err = g.getError();
     if (err) error = err;
   }
@@ -198,6 +204,21 @@
 
   function handleNormalized(event: CustomEvent<{ value: boolean }>) {
     focusedGraph?.setNormalized(event.detail.value);
+    syncFromGraph();
+  }
+
+  function handleAutoscaleMode(event: CustomEvent<{ value: string }>) {
+    focusedGraph?.setAutoscaleMode(event.detail.value);
+    syncFromGraph();
+  }
+
+  function handleYScale(event: CustomEvent<{ value: string }>) {
+    focusedGraph?.setYScale(event.detail.value);
+    syncFromGraph();
+  }
+
+  function handleDownsampleMode(event: CustomEvent<{ value: string }>) {
+    focusedGraph?.setDownsampleMode(event.detail.value);
     syncFromGraph();
   }
 
@@ -612,10 +633,16 @@
           {pointRadius}
           {showGrid}
           {normalized}
+          {autoscaleMode}
+          {yScale}
+          {downsampleMode}
           on:linewidth={handleLineWidth}
           on:pointradius={handlePointRadius}
           on:showgrid={handleShowGrid}
           on:normalized={handleNormalized}
+          on:autoscalemode={handleAutoscaleMode}
+          on:yscale={handleYScale}
+          on:downsamplemode={handleDownsampleMode}
         />
       {/if}
     {/if}
