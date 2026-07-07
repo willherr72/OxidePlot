@@ -33,7 +33,7 @@
   let viewState: ViewState | null = null;
   let hasData = false;
   let drawMode: 'lines' | 'step' | 'points' = 'lines';
-  let viewMode: 'plot' | 'table' = 'plot';
+  let viewMode: 'plot' | 'table' | 'dist' = 'plot';
   let cursorMode = false;
   // Appearance (mirrors of the focused graph's settings; seeded with the
   // graph's defaults so the Settings panel shows correct initial values).
@@ -222,12 +222,6 @@
 
   function handleDownsampleMode(event: CustomEvent<{ value: string }>) {
     focusedGraph?.setDownsampleMode(event.detail.value);
-    syncFromGraph();
-  }
-
-  // ── View mode (plot / table) ───────────────────────────────────────────────
-  async function toggleViewMode() {
-    await focusedGraph?.toggleViewMode();
     syncFromGraph();
   }
 
@@ -540,10 +534,6 @@
       <button class="tbtn drawmode" disabled={!hasData} on:click={cycleDrawMode} title="Cycle draw mode: Lines → Step → Points">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 12 7 12 10 5 14 19 17 12 21 12"/></svg>
         {DRAW_MODE_LABELS[drawMode]}
-      </button>
-      <button class="tbtn" class:active={viewMode === 'table'} disabled={!hasData} on:click={toggleViewMode} title={viewMode === 'table' ? 'Switch to plot view' : 'Switch to table view'}>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
-        Table
       </button>
     </div>
 

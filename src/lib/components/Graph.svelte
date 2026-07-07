@@ -21,6 +21,7 @@
   import { Renderer } from '../renderer.js';
   import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from '../renderer.js';
   import TableView from './TableView.svelte';
+  import DistView from './DistView.svelte';
   import Axes from '../overlay/Axes.svelte';
   import Cursors from '../overlay/Cursors.svelte';
   import type { CursorPoint } from '../overlay/Cursors.svelte';
@@ -61,9 +62,10 @@
   let yScale = 'linear';
   let downsampleMode = 'minmax';
 
-  // ── View mode (plot / table) ────────────────────────────────────────────────
-  let viewMode: 'plot' | 'table' = 'plot';
+  // ── View mode (plot / table / dist) ─────────────────────────────────────────
+  let viewMode: 'plot' | 'table' | 'dist' = 'plot';
   let tableView: TableView;
+  let distView: DistView;
 
   // ── Selected series (drives the single-series Distribution view) ────────────
   let selectedSeriesIndex = 0;
@@ -331,12 +333,14 @@
     if (!cursorMode) cursors = [];
   }
 
-  /** Toggle plot ↔ table view; mounts + refreshes the table on switch. */
-  export async function toggleViewMode(): Promise<void> {
-    viewMode = viewMode === 'plot' ? 'table' : 'plot';
-    if (viewMode === 'table') {
-      await tick();
-      if (tableView) tableView.refresh();
+  /** Switch to `mode` (plot/table/dist); mounts + refreshes the target view on switch. */
+  export async function setViewMode(mode: 'plot' | 'table' | 'dist'): Promise<void> {
+    viewMode = mode;
+    await tick();
+    if (mode === 'table') {
+      tableView?.refresh();
+    } else if (mode === 'dist') {
+      distView?.refresh();
     }
   }
 
@@ -445,7 +449,7 @@
   export function getSeriesInfo(): SeriesInfoEntry[] { return seriesInfo; }
   export function getViewState(): ViewState | null { return viewState; }
   export function getDrawMode(): DrawMode { return drawMode; }
-  export function getViewMode(): 'plot' | 'table' { return viewMode; }
+  export function getViewMode(): 'plot' | 'table' | 'dist' { return viewMode; }
   export function getShowGrid(): boolean { return showGrid; }
   export function getCursorMode(): boolean { return cursorMode; }
   export function getHasData(): boolean { return hasData; }
@@ -456,16 +460,45 @@
   export function getYScale(): string { return yScale; }
   export function getDownsampleMode(): string { return downsampleMode; }
   export function getSelectedSeriesIndex(): number { return selectedSeriesIndex; }
-  export function setSelectedSeriesIndex(i: number): void { selectedSeriesIndex = i; }
+  export function setSelectedSeriesIndex(i: number): void {
+    selectedSeriesIndex = i;
+    if (viewMode === 'dist') distView?.refresh();
+  }
 </script>
 
-<!-- Table view — rendered alongside (not replacing) the canvas -->
-{#if hasData && viewMode === 'table'}
-  <TableView bind:this={tableView} {renderer} />
+<!-- Per-graph view tabs — switch this graph between Plot/Table/Dist. -->
+{#if hasData}
+  <div class="view-tabs">
+    <button
+      class="view-tab"
+      class:active={viewMode === 'plot'}
+      on:click={() => setViewMode('plot')}
+      title="Plot view"
+    >Plot</button>
+    <button
+      class="view-tab"
+      class:active={viewMode === 'table'}
+      on:click={() => setViewMode('table')}
+      title="Table view"
+    >Table</button>
+    <button
+      class="view-tab"
+      class:active={viewMode === 'dist'}
+      on:click={() => setViewMode('dist')}
+      title="Distribution view"
+    >Dist</button>
+  </div>
 {/if}
 
-<!-- Plot canvas + axis overlay — fills the remaining space; hidden (not unmounted) in table mode -->
-<div class="canvas-wrap" class:hidden={viewMode === 'table'} class:focused>
+<!-- Table / Dist view — rendered alongside (not replacing) the canvas -->
+{#if hasData && viewMode === 'table'}
+  <TableView bind:this={tableView} {renderer} />
+{:else if hasData && viewMode === 'dist'}
+  <DistView bind:this={distView} {renderer} seriesIndex={selectedSeriesIndex} />
+{/if}
+
+<!-- Plot canvas + axis overlay — fills the remaining space; hidden (not unmounted) outside plot mode -->
+<div class="canvas-wrap" class:hidden={viewMode !== 'plot'} class:focused>
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <canvas
     bind:this={canvas}
@@ -508,6 +541,45 @@
 </div>
 
 <style>
+  /* ── Per-graph view tab strip (Plot / Table / Dist) ── */
+  .view-tabs {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 6px;
+    background: var(--btn-bg);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .view-tab {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: var(--font-ui);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    transition: background 0.13s ease, color 0.13s ease, border-color 0.13s ease;
+  }
+
+  .view-tab:hover {
+    background: var(--btn-active-bg);
+    color: var(--text);
+  }
+
+  .view-tab.active {
+    background: var(--btn-active-bg);
+    color: var(--accent);
+    border-color: var(--btn-active-border);
+  }
+
   .canvas-wrap {
     position: relative;
     flex: 1;
