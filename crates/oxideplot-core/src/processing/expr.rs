@@ -506,4 +506,15 @@ mod expr_tests {
         // trailing window of 2: [0], [0,2]→1, [2,4]→3, [4,6]→5
         assert_eq!(out, vec![0.0, 1.0, 3.0, 5.0]);
     }
+
+    #[test]
+    fn rolling_corr_trailing_window() {
+        // Two perfectly correlated columns (b = 2a) → trailing rolling correlation
+        // is 1.0 once the window has >= 2 points. Exercises the pearson seam.
+        let a = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let b = vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0];
+        let out = rolling_compute("rolling_corr", &[a, b], 3, 6);
+        assert!(out[0].is_nan(), "row 0 has a 1-point window → pearson None → NaN");
+        assert!((out[5] - 1.0).abs() < 1e-9, "expected r≈1 for the trailing window, got {}", out[5]);
+    }
 }
