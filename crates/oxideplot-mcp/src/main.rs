@@ -1949,7 +1949,8 @@ fn build_panel(
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct PingParams {
-    /// Any text; the server echoes it back.
+    /// Optional text; the server echoes it back. Omit for a bare liveness check.
+    #[serde(default)]
     message: String,
 }
 
