@@ -65,6 +65,9 @@
   let viewMode: 'plot' | 'table' = 'plot';
   let tableView: TableView;
 
+  // ── Selected series (drives the single-series Distribution view) ────────────
+  let selectedSeriesIndex = 0;
+
   // ── Draw mode ────────────────────────────────────────────────────────────────
   type DrawMode = 'lines' | 'step' | 'points';
   const DRAW_MODES: DrawMode[] = ['lines', 'step', 'points'];
@@ -110,6 +113,12 @@
       seriesInfo = renderer.seriesInfo();
     } catch (_) {
       seriesInfo = [];
+    }
+    // Keep the selection in range as series are added/removed/reordered.
+    if (seriesInfo.length === 0) {
+      selectedSeriesIndex = 0;
+    } else if (selectedSeriesIndex > seriesInfo.length - 1) {
+      selectedSeriesIndex = seriesInfo.length - 1;
     }
   }
 
@@ -282,6 +291,7 @@
     renderer.setSeries(specs);
     hasData = true;
     drawMode = 'lines'; // reset to default on new data load
+    selectedSeriesIndex = 0; // fresh data — select the first series
     refreshView();
     refreshSeriesInfo();
     if (viewMode === 'table') {
@@ -445,6 +455,8 @@
   export function getAutoscaleMode(): string { return autoscaleMode; }
   export function getYScale(): string { return yScale; }
   export function getDownsampleMode(): string { return downsampleMode; }
+  export function getSelectedSeriesIndex(): number { return selectedSeriesIndex; }
+  export function setSelectedSeriesIndex(i: number): void { selectedSeriesIndex = i; }
 </script>
 
 <!-- Table view — rendered alongside (not replacing) the canvas -->

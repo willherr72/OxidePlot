@@ -5,7 +5,10 @@
   /** Array of series info objects from renderer.seriesInfo(). */
   export let series: SeriesInfoEntry[];
 
-  const dispatch = createEventDispatcher<{ change: void }>();
+  /** Index of the currently selected series row (null = none selected). */
+  export let selectedIndex: number | null = null;
+
+  const dispatch = createEventDispatcher<{ change: void; select: number }>();
 
   import type { Renderer } from '../renderer.js';
   export let renderer: Renderer;
@@ -54,6 +57,11 @@
     if (i >= series.length - 1) return;
     renderer.moveSeries(i, i + 1);
     dispatch('change');
+  }
+
+  /** Select series `i` (used by the Distribution view's single-series histogram). */
+  function selectRow(i: number) {
+    dispatch('select', i);
   }
 
   // ── fx picker state ────────────────────────────────────────────────────────
@@ -108,7 +116,7 @@
   <ul class="series-list">
     {#each series as s, i}
       <li class="series-item">
-        <div class="series-row" class:hidden={!s.visible}>
+        <div class="series-row" class:hidden={!s.visible} class:selected={i === selectedIndex}>
           <!-- Color swatch — click to pick a custom color -->
           <label class="swatch-label" title="Click to change color">
             <span class="swatch" style="background:{toCSS(s.color)}"></span>
@@ -120,8 +128,15 @@
               aria-label="Change series color"
             />
           </label>
-          <!-- Name -->
-          <span class="series-name" title={s.name}>{s.name}</span>
+          <!-- Name — click to select this series (single-series views) -->
+          <span
+            class="series-name"
+            title={s.name}
+            role="button"
+            tabindex="0"
+            on:click={() => selectRow(i)}
+            on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectRow(i); } }}
+          >{s.name}</span>
           <!-- Controls -->
           <span class="controls">
             <button
@@ -289,6 +304,10 @@
     opacity: 0.45;
   }
 
+  .series-row.selected {
+    background: var(--col-row-selected);
+  }
+
   .swatch-label {
     position: relative;
     display: inline-flex;
@@ -330,6 +349,12 @@
     white-space: nowrap;
     font-size: 0.78rem;
     color: var(--series-name-text);
+    cursor: pointer;
+  }
+
+  .series-name:focus-visible {
+    outline: 1px solid var(--btn-active-border);
+    outline-offset: 1px;
   }
 
   .controls {

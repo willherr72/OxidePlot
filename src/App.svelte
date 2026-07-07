@@ -44,6 +44,8 @@
   let autoscaleMode = 'minmax';
   let yScale = 'linear';
   let downsampleMode = 'minmax';
+  /** Index of the currently-selected series row (drives the Distribution view). */
+  let selectedSeriesIndex = 0;
 
   /** Pull all panel-facing state from the focused graph.
    *  Reads `graphRefs[focusedId]` directly (not the reactive `focusedGraph`
@@ -66,6 +68,7 @@
     autoscaleMode = g.getAutoscaleMode();
     yScale = g.getYScale();
     downsampleMode = g.getDownsampleMode();
+    selectedSeriesIndex = g.getSelectedSeriesIndex();
     const err = g.getError();
     if (err) error = err;
   }
@@ -624,7 +627,9 @@
         <SeriesList
           series={seriesInfo}
           renderer={focusedGraph.renderer}
+          selectedIndex={selectedSeriesIndex}
           on:change={handleSeriesChange}
+          on:select={(e) => { focusedGraph?.setSelectedSeriesIndex(e.detail); syncFromGraph(); }}
         />
       {/if}
       {#if showSettings}
