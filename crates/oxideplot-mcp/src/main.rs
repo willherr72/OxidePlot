@@ -245,6 +245,46 @@ fn localize_changepoint(vals: &[f64], lo: usize, hi: usize, m0: f64, m1: f64) ->
     (lo + hi) / 2
 }
 
+/// Rough channel role from its name: 0 = raw source (`raw…`), 2 = derived output
+/// (calibrated/calculated/…), 1 = neutral. Used to trace a fault to its source.
+fn channel_role(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if n.starts_with("raw") {
+        return 0;
+    }
+    const DERIVED: &[&str] = &[
+        "calibrated",
+        "calculated",
+        "computed",
+        "corrected",
+        "derived",
+        "adjusted",
+    ];
+    if DERIVED.iter().any(|d| n.contains(d)) {
+        return 2;
+    }
+    1
+}
+
+/// Robust level shift at `onset`: (median_after − median_before, |shift| / MAD-noise)
+/// over a window `w` either side. Used to spot a co-occurring shift in a raw
+/// channel that didn't independently cross the changepoint threshold.
+fn shift_ratio_at(vals: &[f64], onset: usize, w: usize) -> Option<(f64, f64)> {
+    let n = vals.len();
+    if onset == 0 || onset >= n {
+        return None;
+    }
+    let lo = onset.saturating_sub(w);
+    let hi = (onset + w).min(n);
+    let before: Vec<f64> = vals[lo..onset].iter().copied().filter(|v| v.is_finite()).collect();
+    let after: Vec<f64> = vals[onset..hi].iter().copied().filter(|v| v.is_finite()).collect();
+    let (mb, db) = median_mad(&before)?;
+    let (ma, da) = median_mad(&after)?;
+    let noise = (db.max(da) * 1.4826).max(1e-9);
+    let shift = ma - mb;
+    Some((shift, shift.abs() / noise))
+}
+
 /// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
 fn longest_constant_run(cells: &[String]) -> usize {
     let mut best = 0usize;
@@ -434,6 +474,12 @@ struct CorrelateParams {
 struct HealthParams {
     /// Dataset id returned by load_csv.
     dataset_id: String,
+    /// Optional channel-lineage hint: maps a derived/calibrated column name to the
+    /// raw source columns it is computed from (e.g. {"calibrated_az": ["raw_ax2",
+    /// "raw_ay2","raw_az2"]}). When a fault appears in a derived column, it is
+    /// traced back to these sources. Naming (raw…/calibrated…) is used when omitted.
+    #[serde(default)]
+    lineage: Option<std::collections::HashMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -876,11 +922,14 @@ impl OxidePlot {
     }
 
     #[tool(
-        description = "One-call QC health scan of a dataset: returns a severity-ranked list of issues — dead/frozen channels, single-sample glitches (robust z-score), mid-run level shifts (changepoints), time-index gaps, and missing-data clusters. The report a field engineer runs first."
+        description = "One-call QC health scan of a dataset: returns a severity-ranked list of issues — dead/frozen channels, single-sample glitches (robust z-score), mid-run level shifts (changepoints, grouped into regime_change_events and traced to the likely raw source channel), time-index gaps, and missing-data clusters. Pass 'lineage' to map derived columns to their raw sources for precise attribution. The report a field engineer runs first."
     )]
     async fn health_check(
         &self,
-        Parameters(HealthParams { dataset_id }): Parameters<HealthParams>,
+        Parameters(HealthParams {
+            dataset_id,
+            lineage,
+        }): Parameters<HealthParams>,
     ) -> Result<CallToolResult, McpError> {
         let s = self.session.lock().await;
         let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
@@ -889,6 +938,8 @@ impl OxidePlot {
         let n_rows = ds.data.row_count;
         // (severity_rank, finding); 0 = high, 1 = medium, 2 = low.
         let mut findings: Vec<(u8, serde_json::Value)> = Vec::new();
+        // Detected changepoints (col idx, onset row, shift) — grouped + traced later.
+        let mut changepoints: Vec<(usize, usize, f64)> = Vec::new();
 
         // Dataset-level: time-index gaps (first datetime column).
         for c in 0..ds.data.columns.len() {
@@ -1033,11 +1084,107 @@ impl OxidePlot {
                         if (b - a).abs() > 6.0 * scale {
                             let onset =
                                 localize_changepoint(&vals, bounds[seg - 1].0, bounds[seg].1, a, b);
-                            findings.push((1, json!({ "severity": "medium", "kind": "changepoint", "column": name, "detail": format!("median shifts {:.4} at ~row {}", b - a, onset), "row": onset })));
+                            changepoints.push((c, onset, b - a));
                             break;
                         }
                     }
                 }
+            }
+        }
+
+        // --- Channel-lineage tracing: cluster co-occurring changepoints into one
+        // event and attribute it to the likely raw source (naming → explicit
+        // lineage hint → co-occurrence scan of raw channels at the onset). ---
+        changepoints.sort_by_key(|cp| cp.1);
+        let tol = (n_rows / 50).max(20);
+        let mut clusters: Vec<Vec<(usize, usize, f64)>> = Vec::new();
+        for cp in changepoints {
+            match clusters.last_mut() {
+                Some(last) if cp.1 <= last.last().unwrap().1 + tol => last.push(cp),
+                _ => clusters.push(vec![cp]),
+            }
+        }
+        let raw_cols: Vec<usize> = (0..ds.data.columns.len())
+            .filter(|&c| ds.numeric_cols[c] && channel_role(&ds.data.columns[c]) == 0)
+            .collect();
+
+        for cl in &clusters {
+            let onset = cl.iter().map(|c| c.1).min().unwrap();
+            let cols_in: Vec<usize> = cl.iter().map(|c| c.0).collect();
+            let mut culprit: Vec<usize> = Vec::new();
+            // (a) raw-named columns already in the cluster.
+            for &c in &cols_in {
+                if channel_role(&ds.data.columns[c]) == 0 && !culprit.contains(&c) {
+                    culprit.push(c);
+                }
+            }
+            // (b) explicit lineage hint on any derived column in the cluster.
+            if let Some(map) = &lineage {
+                for &c in &cols_in {
+                    if let Some(sources) = map.get(&ds.data.columns[c]) {
+                        for src in sources {
+                            if let Some(si) = resolve_col(&ds.data, src) {
+                                if !culprit.contains(&si) {
+                                    culprit.push(si);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // (c) co-occurrence scan: a raw channel that shifted at the onset.
+            if culprit.is_empty() {
+                let w = tol.max(30);
+                let mut best: Option<(usize, f64)> = None;
+                for &rc in &raw_cols {
+                    if cols_in.contains(&rc) {
+                        continue;
+                    }
+                    let (rvals, _) = column_to_f64(&ds.data.column_data[rc]);
+                    if let Some((_, ratio)) = shift_ratio_at(&rvals, onset, w) {
+                        if ratio > 5.0 && best.map_or(true, |b| ratio > b.1) {
+                            best = Some((rc, ratio));
+                        }
+                    }
+                }
+                if let Some((rc, _)) = best {
+                    culprit.push(rc);
+                }
+            }
+
+            let source_traced = culprit.iter().any(|c| !cols_in.contains(c));
+            if cols_in.len() == 1 && !source_traced {
+                let name = &ds.data.columns[cols_in[0]];
+                findings.push((1, json!({ "severity": "medium", "kind": "changepoint", "column": name, "detail": format!("median shifts {:.4} at ~row {onset}", cl[0].2), "row": onset })));
+            } else {
+                let affected: Vec<&String> = cols_in.iter().map(|&c| &ds.data.columns[c]).collect();
+                let culprit_names: Vec<&String> =
+                    culprit.iter().map(|&c| &ds.data.columns[c]).collect();
+                let detail = if culprit_names.is_empty() {
+                    format!(
+                        "coincident level shift across {} channels at ~row {onset} (source unclear)",
+                        affected.len()
+                    )
+                } else {
+                    format!(
+                        "level shift at ~row {onset}; likely source: {}; affects {} channel(s)",
+                        culprit_names
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        affected.len()
+                    )
+                };
+                let sev = if culprit_names.is_empty() { 1 } else { 0 };
+                findings.push((sev, json!({
+                    "severity": if sev == 0 { "high" } else { "medium" },
+                    "kind": "regime_change_event",
+                    "onset_row": onset,
+                    "culprit": culprit_names,
+                    "affected": affected,
+                    "detail": detail,
+                })));
             }
         }
 
