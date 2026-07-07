@@ -136,3 +136,67 @@ mod tests {
         assert_eq!(out_y.len(), ys.len());
     }
 }
+
+/// Min/max envelope decimation: split into `buckets` equal index ranges and keep
+/// each bucket's min-y AND max-y point (in x order). Unlike LTTB this NEVER drops
+/// a 1-sample spike or dropout — the extreme in each bucket is always kept.
+/// Returns up to 2×buckets points.
+pub fn minmax_envelope(fx: &[f64], fy: &[f64], buckets: usize) -> (Vec<f64>, Vec<f64>) {
+    let n = fx.len();
+    if buckets == 0 || n <= buckets * 2 {
+        return (fx.to_vec(), fy.to_vec());
+    }
+    let mut ox = Vec::with_capacity(buckets * 2);
+    let mut oy = Vec::with_capacity(buckets * 2);
+    for b in 0..buckets {
+        let lo = b * n / buckets;
+        let hi = ((b + 1) * n / buckets).min(n);
+        if lo >= hi {
+            continue;
+        }
+        let mut imin = lo;
+        let mut imax = lo;
+        for i in lo..hi {
+            if fy[i] < fy[imin] {
+                imin = i;
+            }
+            if fy[i] > fy[imax] {
+                imax = i;
+            }
+        }
+        let (a, c) = if imin <= imax { (imin, imax) } else { (imax, imin) };
+        ox.push(fx[a]);
+        oy.push(fy[a]);
+        if c != a {
+            ox.push(fx[c]);
+            oy.push(fy[c]);
+        }
+    }
+    (ox, oy)
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[test]
+    fn minmax_keeps_a_lone_spike() {
+        // 1000 samples of 0.0 with a single 1e6 spike at index 640.
+        let n = 1000;
+        let fx: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut fy = vec![0.0f64; n];
+        fy[640] = 1e6;
+        let (_, oy) = minmax_envelope(&fx, &fy, 100); // 100 buckets → ≤200 points
+        assert!(oy.iter().cloned().fold(0.0, f64::max) >= 1e6,
+            "min/max envelope must preserve the spike");
+        assert!(oy.len() < n, "should have downsampled");
+    }
+
+    #[test]
+    fn minmax_passthrough_when_small() {
+        let fx = [0.0, 1.0, 2.0];
+        let fy = [0.0, 1.0, 2.0];
+        let (ox, _) = minmax_envelope(&fx, &fy, 100);
+        assert_eq!(ox.len(), 3);
+    }
+}
