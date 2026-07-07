@@ -33,13 +33,31 @@ mod wasm_impl {
     use oxideplot_core::render::renderer::PlotRenderer;
     use oxideplot_core::data::loader::{LoadedData, FileMeta, load_from_bytes, column_to_f64, column_to_timestamps};
     use oxideplot_core::data::table::{ColFilter, TableQuery, compute_view_index, window_rows};
-    use oxideplot_core::processing::downsampling::downsample_for_view;
+    use oxideplot_core::processing::downsampling::{DownsampleMode, downsample_for_view_mode};
+    use oxideplot_core::processing::statistics::percentile;
     use oxideplot_core::state::plot_view::PlotViewState;
     use oxideplot_core::geom::{Pos2, Rect};
     use oxideplot_core::render::axis::{compute_grid_lines, format_tick_value};
     use oxideplot_core::data::datetime::format_timestamp;
     use oxideplot_core::processing::math_ops;
     use oxideplot_core::processing::interpolation;
+
+    /// Autoscale strategy for the non-normalized Y bounds in `auto_fit`.
+    /// `MinMax` uses the raw data extremes; `Robust` clips to the 1st/99th
+    /// percentiles so outliers don't dominate the visible range.
+    #[derive(Clone, Copy, PartialEq)]
+    enum AutoscaleMode {
+        MinMax,
+        Robust,
+    }
+
+    /// Y-axis scale mode. `Log` renders each surviving point at `log10(y)`
+    /// (dropping `y <= 0`) and fits/labels the axis in log-space.
+    #[derive(Clone, Copy, PartialEq)]
+    enum YScale {
+        Linear,
+        Log,
+    }
 
     /// Minimum target point count when width is very small.
     const MIN_TARGET_POINTS: usize = 800;
@@ -224,6 +242,12 @@ mod wasm_impl {
         /// When true, each series' Y is rescaled to [0, 1] (per-source global range)
         /// before building GPU points, and the Y view is set to [-0.05, 1.05].
         normalized: bool,
+        /// Autoscale strategy for non-normalized Y bounds (MinMax | Robust).
+        autoscale_mode: AutoscaleMode,
+        /// Y-axis scale (Linear | Log). Log maps points to log10(y) and drops y<=0.
+        y_scale: YScale,
+        /// Decimation strategy used when building the visible render series.
+        downsample_mode: DownsampleMode,
         /// Current table query (sort, search, per-column filters, numeric_cols).
         table_query: TableQuery,
         /// Filtered + sorted row indices for the current table_query.
@@ -284,6 +308,9 @@ mod wasm_impl {
                 point_radius: 3.0,
                 bg_color: [0.10_f64, 0.10, 0.12, 1.0],
                 normalized: false,
+                autoscale_mode: AutoscaleMode::MinMax,
+                y_scale: YScale::Linear,
+                downsample_mode: DownsampleMode::MinMax,
                 table_query: TableQuery::default(),
                 table_index: vec![],
             }
@@ -475,25 +502,59 @@ mod wasm_impl {
             self.view.x_max = x_max + x_pad;
 
             if !self.normalized {
-                // Normal mode: fit Y from raw data values.
-                let mut y_min = f64::INFINITY;
-                let mut y_max = f64::NEG_INFINITY;
+                // Normal mode: fit Y from raw data values, honoring the Y-scale.
+                // In Log mode each y>0 contributes log10(y) and non-positive y is
+                // dropped; in Linear mode every finite y contributes as-is.
+                let log = self.y_scale == YScale::Log;
+                let robust = self.autoscale_mode == AutoscaleMode::Robust;
+
+                let mut v_min = f64::INFINITY;
+                let mut v_max = f64::NEG_INFINITY;
+                // Only the Robust path needs the full stream for percentiles.
+                let mut vals: Vec<f64> = Vec::new();
 
                 for s in &self.sources {
                     if !s.visible {
                         continue; // fit to what's shown, not hidden series
                     }
                     for &y in s.ys.iter() {
-                        if y.is_finite() {
-                            y_min = y_min.min(y);
-                            y_max = y_max.max(y);
+                        if !y.is_finite() {
+                            continue;
+                        }
+                        let v = if log {
+                            if y > 0.0 { y.log10() } else { continue }
+                        } else {
+                            y
+                        };
+                        v_min = v_min.min(v);
+                        v_max = v_max.max(v);
+                        if robust {
+                            vals.push(v);
                         }
                     }
                 }
 
-                if !y_min.is_finite() || !y_max.is_finite() {
-                    return;
-                }
+                let (y_min, y_max) = if robust {
+                    // Clip to the 1st/99th percentiles so outliers don't dominate.
+                    // Fall back to the min/max of the stream, then to (0, 1) if the
+                    // percentile range is degenerate (non-finite or y_max <= y_min).
+                    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let lo = percentile(&vals, 0.01);
+                    let hi = percentile(&vals, 0.99);
+                    if lo.is_finite() && hi.is_finite() && hi > lo {
+                        (lo, hi)
+                    } else if v_min.is_finite() && v_max.is_finite() && v_max > v_min {
+                        (v_min, v_max)
+                    } else {
+                        (0.0, 1.0)
+                    }
+                } else {
+                    // MinMax: raw extremes of the stream (existing behavior for linear).
+                    if !v_min.is_finite() || !v_max.is_finite() {
+                        return;
+                    }
+                    (v_min, v_max)
+                };
 
                 let y_pad = ((y_max - y_min) * 0.05).max(1e-9);
                 self.view.y_min = y_min - y_pad;
@@ -576,12 +637,19 @@ mod wasm_impl {
                 })
                 .collect();
 
+            let y_log = self.y_scale == YScale::Log;
             let y_ticks: Vec<TickEntry> = y_lines
                 .into_iter()
-                .map(|(val, major)| TickEntry {
-                    value: val,
-                    label: format_tick_value(val),
-                    major,
+                .map(|(val, major)| {
+                    // In Log mode the view (and thus `val`) is in log10-space, so
+                    // keep `value` as-is for correct positioning but label with the
+                    // de-logged magnitude 10^val.
+                    let label = if y_log {
+                        format_tick_value(10f64.powf(val))
+                    } else {
+                        format_tick_value(val)
+                    };
+                    TickEntry { value: val, label, major }
                 })
                 .collect();
 
@@ -780,6 +848,49 @@ mod wasm_impl {
         pub fn set_normalized(&mut self, on: bool) {
             self.normalized = on;
             self.auto_fit();
+        }
+
+        /// Set the autoscale strategy for the (non-normalized) Y bounds.
+        ///
+        /// `mode` is `"robust"` (clip to 1st/99th percentiles) or `"minmax"`
+        /// (raw data extremes; the default). Unrecognised values fall back to
+        /// MinMax. Re-fits the view via `auto_fit()` (which re-renders).
+        #[wasm_bindgen]
+        pub fn set_autoscale_mode(&mut self, mode: String) {
+            self.autoscale_mode = if mode == "robust" {
+                AutoscaleMode::Robust
+            } else {
+                AutoscaleMode::MinMax
+            };
+            self.auto_fit();
+        }
+
+        /// Set the Y-axis scale.
+        ///
+        /// `mode` is `"log"` (plot log10(y), dropping y<=0) or `"linear"` (the
+        /// default). Unrecognised values fall back to Linear. Re-fits the view
+        /// via `auto_fit()` (which re-renders).
+        #[wasm_bindgen]
+        pub fn set_y_scale(&mut self, mode: String) {
+            self.y_scale = if mode == "log" {
+                YScale::Log
+            } else {
+                YScale::Linear
+            };
+            self.auto_fit();
+        }
+
+        /// Set the downsampling (decimation) strategy for the visible render series.
+        ///
+        /// `mode` is one of `"minmax"` (default), `"lttb"`, or `"none"`.
+        /// Unrecognised values fall back to MinMax. Rebuilds the visible series
+        /// at the current view and re-renders (bounds are unchanged, so no
+        /// `auto_fit()`).
+        #[wasm_bindgen]
+        pub fn set_downsample_mode(&mut self, mode: String) {
+            self.downsample_mode = DownsampleMode::parse(&mode);
+            self.rebuild_visible();
+            self.render();
         }
 
         // ── Export ────────────────────────────────────────────────────────────
@@ -1045,9 +1156,11 @@ mod wasm_impl {
         /// visible X-range.  Target point count = max(width, MIN_TARGET_POINTS),
         /// giving roughly one point per horizontal pixel.
         ///
-        /// Uses `downsample_for_view` from oxideplot-core, which uses binary
-        /// search on sorted X data and extends the window by one extra point on
-        /// each edge so lines don't clip while panning.
+        /// Uses `downsample_for_view_mode` from oxideplot-core (selecting the
+        /// current `downsample_mode`), which uses binary search on sorted X data
+        /// and extends the window by one extra point on each edge so lines don't
+        /// clip while panning. In Log Y-scale mode the surviving points are
+        /// log10-transformed (dropping y<=0) after decimation.
         ///
         /// Performance note: this runs on every pan/zoom event (per pointermove
         /// during a drag).  For very large datasets (~1M points) the O(n) visible
@@ -1076,8 +1189,16 @@ mod wasm_impl {
                         };
                     }
 
-                    let (vis_x, vis_y) =
-                        downsample_for_view(&src.xs, &src.ys, x_min, x_max, target);
+                    // Decimate first (in raw Y-space), then log-transform the
+                    // survivors below — per the Global Constraints ordering.
+                    let (vis_x, vis_y) = downsample_for_view_mode(
+                        &src.xs,
+                        &src.ys,
+                        x_min,
+                        x_max,
+                        target,
+                        self.downsample_mode,
+                    );
 
                     let points: Vec<[f32; 2]> = if self.normalized {
                         // Normalize Y using this source's global min/max.
@@ -1094,6 +1215,15 @@ mod wasm_impl {
                                 };
                                 [x as f32, yn as f32]
                             })
+                            .collect()
+                    } else if self.y_scale == YScale::Log {
+                        // Log Y: plot log10(y), dropping non-positive samples
+                        // (log undefined). Non-finite y was excluded in set_series.
+                        vis_x
+                            .iter()
+                            .zip(vis_y.iter())
+                            .filter(|&(_, &y)| y > 0.0)
+                            .map(|(&x, &y)| [x as f32, y.log10() as f32])
                             .collect()
                     } else {
                         vis_x
