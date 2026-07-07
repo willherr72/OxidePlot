@@ -189,6 +189,62 @@ fn heat_color(t: f64) -> [u8; 3] {
     ]
 }
 
+/// Group a sorted list of row indices into runs (start, end, count), joining
+/// indices no more than `max_gap` apart.
+fn group_runs(rows: &[usize], max_gap: usize) -> Vec<(usize, usize, usize)> {
+    let mut runs = Vec::new();
+    if rows.is_empty() {
+        return runs;
+    }
+    let (mut start, mut prev, mut count) = (rows[0], rows[0], 1usize);
+    for &r in &rows[1..] {
+        if r <= prev + max_gap + 1 {
+            prev = r;
+            count += 1;
+        } else {
+            runs.push((start, prev, count));
+            start = r;
+            prev = r;
+            count = 1;
+        }
+    }
+    runs.push((start, prev, count));
+    runs
+}
+
+/// Median and MAD (median absolute deviation) of the finite values.
+fn median_mad(vals: &[f64]) -> Option<(f64, f64)> {
+    let mut v: Vec<f64> = vals.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med = v[v.len() / 2];
+    let mut d: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
+    d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some((med, d[d.len() / 2]))
+}
+
+/// Narrow a changepoint (level `m0` → `m1`) to the transition row within
+/// `[lo, hi)` — the first row where a trailing-window mean crosses the midpoint.
+fn localize_changepoint(vals: &[f64], lo: usize, hi: usize, m0: f64, m1: f64) -> usize {
+    let mid = (m0 + m1) * 0.5;
+    let ascending = m1 >= m0;
+    let win = ((hi - lo) / 6).clamp(5, 300);
+    for r in lo..hi {
+        let a = r.saturating_sub(win).max(lo);
+        let s: Vec<f64> = vals[a..=r].iter().copied().filter(|v| v.is_finite()).collect();
+        if s.is_empty() {
+            continue;
+        }
+        let m = s.iter().sum::<f64>() / s.len() as f64;
+        if (ascending && m >= mid) || (!ascending && m <= mid) {
+            return r;
+        }
+    }
+    (lo + hi) / 2
+}
+
 /// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
 fn longest_constant_run(cells: &[String]) -> usize {
     let mut best = 0usize;
@@ -906,35 +962,46 @@ impl OxidePlot {
             if n_rows > 0 && n_missing as f64 / n_rows as f64 > 0.05 {
                 findings.push((1, json!({ "severity": "medium", "kind": "missing", "column": name, "detail": format!("{:.1}% missing ({n_missing} rows)", 100.0 * n_missing as f64 / n_rows as f64) })));
             }
-            // Single-sample glitches via robust z-score (median / MAD).
+            // Outliers via robust z-score (median / MAD): isolated short runs are
+            // glitches; a long contiguous run is a regime (e.g. the stationary
+            // survey start), not a glitch — reported separately at lower severity.
             if n_finite >= 20 {
-                let mut sf = finite.clone();
-                sf.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = sf[sf.len() / 2];
-                let mut devs: Vec<f64> = sf.iter().map(|v| (v - median).abs()).collect();
-                devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let mad = devs[devs.len() / 2];
-                if mad > 0.0 {
-                    let mut rows: Vec<usize> = Vec::new();
-                    for (r, &v) in vals.iter().enumerate() {
-                        if v.is_finite() && (v - median).abs() / (1.4826 * mad) > 10.0 {
-                            rows.push(r);
+                if let Some((median, mad)) = median_mad(&finite) {
+                    if mad > 0.0 {
+                        let rows: Vec<usize> = vals
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, &v)| {
+                                v.is_finite() && (v - median).abs() / (1.4826 * mad) > 10.0
+                            })
+                            .map(|(r, _)| r)
+                            .collect();
+                        let mut glitch_ranges: Vec<serde_json::Value> = Vec::new();
+                        let mut glitch_count = 0usize;
+                        for (rs, re, count) in group_runs(&rows, 2) {
+                            if count <= 4 {
+                                glitch_count += count;
+                                if glitch_ranges.len() < 10 {
+                                    glitch_ranges.push(json!([rs, re]));
+                                }
+                            } else {
+                                findings.push((1, json!({ "severity": "medium", "kind": "outlier_regime", "column": name, "detail": format!("{count} consecutive out-of-range samples (a regime, not a glitch)"), "rows": [rs, re] })));
+                            }
                         }
-                    }
-                    if !rows.is_empty() {
-                        let sample: Vec<usize> = rows.iter().take(10).copied().collect();
-                        findings.push((0, json!({ "severity": "high", "kind": "glitch", "column": name, "detail": format!("{} sample(s) with robust z>10", rows.len()), "rows_sample": sample })));
+                        if glitch_count > 0 {
+                            findings.push((0, json!({ "severity": "high", "kind": "glitch", "column": name, "detail": format!("{glitch_count} isolated out-of-range sample(s)"), "rows": glitch_ranges })));
+                        }
                     }
                 }
             }
-            // Changepoint: an adjacent-segment mean jump large vs the LOCAL noise
-            // (median within-segment std) — so a shift that inflates the overall
-            // std (and would mask itself) still flags.
-            if n_rows >= 40 {
-                let n_seg = 10usize;
-                let mut means: Vec<Option<f64>> = Vec::new();
-                let mut stds: Vec<f64> = Vec::new();
-                let mut lows: Vec<usize> = Vec::new();
+            // Changepoint: an adjacent-segment MEDIAN jump large vs the local
+            // MAD-noise (robust — a lone spike can't move the median), then
+            // localised to the actual transition row (finer than the segment grid).
+            if n_rows >= 60 {
+                let n_seg = (n_rows / 200).clamp(8, 40);
+                let mut meds: Vec<Option<f64>> = Vec::new();
+                let mut mads: Vec<f64> = Vec::new();
+                let mut bounds: Vec<(usize, usize)> = Vec::new();
                 for seg in 0..n_seg {
                     let lo = seg * n_rows / n_seg;
                     let hi = ((seg + 1) * n_rows / n_seg).min(n_rows);
@@ -945,24 +1012,28 @@ impl OxidePlot {
                         .copied()
                         .filter(|v| v.is_finite())
                         .collect();
-                    let st = SeriesStats::compute(&sl);
-                    means.push(st.as_ref().map(|s| s.mean));
-                    if let Some(s2) = &st {
-                        stds.push(s2.std_dev);
+                    match median_mad(&sl) {
+                        Some((m, d)) => {
+                            meds.push(Some(m));
+                            mads.push(d);
+                        }
+                        None => meds.push(None),
                     }
-                    lows.push(lo);
+                    bounds.push((lo, hi));
                 }
-                stds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let scale = if stds.is_empty() {
+                mads.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let scale = (if mads.is_empty() {
                     0.0
                 } else {
-                    stds[stds.len() / 2]
-                }
+                    mads[mads.len() / 2] * 1.4826
+                })
                 .max(1e-9);
                 for seg in 1..n_seg {
-                    if let (Some(a), Some(b)) = (means[seg - 1], means[seg]) {
-                        if (b - a).abs() > 5.0 * scale {
-                            findings.push((1, json!({ "severity": "medium", "kind": "changepoint", "column": name, "detail": format!("mean shifts {:.3} at ~row {}", b - a, lows[seg]), "row": lows[seg] })));
+                    if let (Some(a), Some(b)) = (meds[seg - 1], meds[seg]) {
+                        if (b - a).abs() > 6.0 * scale {
+                            let onset =
+                                localize_changepoint(&vals, bounds[seg - 1].0, bounds[seg].1, a, b);
+                            findings.push((1, json!({ "severity": "medium", "kind": "changepoint", "column": name, "detail": format!("median shifts {:.4} at ~row {}", b - a, onset), "row": onset })));
                             break;
                         }
                     }
