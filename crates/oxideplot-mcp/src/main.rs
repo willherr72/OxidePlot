@@ -189,6 +189,300 @@ fn heat_color(t: f64) -> [u8; 3] {
     ]
 }
 
+// ---- Mini arithmetic expression evaluator (derive_column op="expr") ----
+// Supports numbers, column names, + - * / ^, parentheses, unary minus, and
+// functions: sqrt abs sin cos tan asin acos atan atan2 hypot pow exp ln log10
+// log floor ceil round sign deg rad min max.
+
+#[derive(Clone)]
+enum Ast {
+    Num(f64),
+    Col(usize),
+    Neg(Box<Ast>),
+    Bin(char, Box<Ast>, Box<Ast>),
+    Func(String, Vec<Ast>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Tok {
+    Num(f64),
+    Ident(String),
+    Op(char),
+    LParen,
+    RParen,
+    Comma,
+}
+
+fn tokenize_expr(s: &str) -> Result<Vec<Tok>, String> {
+    let b = s.as_bytes();
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_whitespace() {
+            i += 1;
+        } else if c.is_ascii_digit() || c == '.' {
+            let start = i;
+            while i < b.len() {
+                let ch = b[i] as char;
+                if ch.is_ascii_digit() || ch == '.' {
+                    i += 1;
+                } else if ch == 'e' || ch == 'E' {
+                    i += 1;
+                    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+                        i += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            let n: f64 = s[start..i]
+                .parse()
+                .map_err(|_| format!("bad number '{}'", &s[start..i]))?;
+            toks.push(Tok::Num(n));
+        } else if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < b.len() && ((b[i] as char).is_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            toks.push(Tok::Ident(s[start..i].to_string()));
+        } else {
+            match c {
+                '+' | '-' | '*' | '/' | '^' => toks.push(Tok::Op(c)),
+                '(' => toks.push(Tok::LParen),
+                ')' => toks.push(Tok::RParen),
+                ',' => toks.push(Tok::Comma),
+                _ => return Err(format!("unexpected character '{c}'")),
+            }
+            i += 1;
+        }
+    }
+    Ok(toks)
+}
+
+struct ExprParser<'a> {
+    toks: Vec<Tok>,
+    pos: usize,
+    data: &'a LoadedData,
+}
+
+impl ExprParser<'_> {
+    fn peek(&self) -> Option<&Tok> {
+        self.toks.get(self.pos)
+    }
+    fn bump(&mut self) -> Option<Tok> {
+        let t = self.toks.get(self.pos).cloned();
+        self.pos += 1;
+        t
+    }
+    fn parse(&mut self) -> Result<Ast, String> {
+        let e = self.add_sub()?;
+        if self.pos != self.toks.len() {
+            return Err("trailing tokens in expression".to_string());
+        }
+        Ok(e)
+    }
+    fn add_sub(&mut self) -> Result<Ast, String> {
+        let mut left = self.mul_div()?;
+        while let Some(Tok::Op(c @ ('+' | '-'))) = self.peek().cloned() {
+            self.pos += 1;
+            let right = self.mul_div()?;
+            left = Ast::Bin(c, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+    fn mul_div(&mut self) -> Result<Ast, String> {
+        let mut left = self.unary()?;
+        while let Some(Tok::Op(c @ ('*' | '/'))) = self.peek().cloned() {
+            self.pos += 1;
+            let right = self.unary()?;
+            left = Ast::Bin(c, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+    fn unary(&mut self) -> Result<Ast, String> {
+        match self.peek() {
+            Some(Tok::Op('-')) => {
+                self.pos += 1;
+                Ok(Ast::Neg(Box::new(self.unary()?)))
+            }
+            Some(Tok::Op('+')) => {
+                self.pos += 1;
+                self.unary()
+            }
+            _ => self.power(),
+        }
+    }
+    fn power(&mut self) -> Result<Ast, String> {
+        let base = self.atom()?;
+        if let Some(Tok::Op('^')) = self.peek() {
+            self.pos += 1;
+            let exp = self.unary()?;
+            return Ok(Ast::Bin('^', Box::new(base), Box::new(exp)));
+        }
+        Ok(base)
+    }
+    fn atom(&mut self) -> Result<Ast, String> {
+        match self.bump() {
+            Some(Tok::Num(n)) => Ok(Ast::Num(n)),
+            Some(Tok::LParen) => {
+                let e = self.add_sub()?;
+                match self.bump() {
+                    Some(Tok::RParen) => Ok(e),
+                    _ => Err("expected ')'".to_string()),
+                }
+            }
+            Some(Tok::Ident(name)) => {
+                if let Some(Tok::LParen) = self.peek() {
+                    self.pos += 1;
+                    let mut args = Vec::new();
+                    if !matches!(self.peek(), Some(Tok::RParen)) {
+                        loop {
+                            args.push(self.add_sub()?);
+                            if let Some(Tok::Comma) = self.peek() {
+                                self.pos += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    match self.bump() {
+                        Some(Tok::RParen) => {}
+                        _ => return Err("expected ')' after function arguments".to_string()),
+                    }
+                    Ok(Ast::Func(name.to_ascii_lowercase(), args))
+                } else {
+                    let ci = resolve_col(self.data, &name)
+                        .ok_or_else(|| format!("unknown column '{name}'"))?;
+                    Ok(Ast::Col(ci))
+                }
+            }
+            other => Err(format!("unexpected token: {other:?}")),
+        }
+    }
+}
+
+fn parse_expr(data: &LoadedData, s: &str) -> Result<Ast, String> {
+    let toks = tokenize_expr(s)?;
+    if toks.is_empty() {
+        return Err("empty expression".to_string());
+    }
+    ExprParser {
+        toks,
+        pos: 0,
+        data,
+    }
+    .parse()
+}
+
+fn collect_expr_cols(a: &Ast, out: &mut std::collections::HashSet<usize>) {
+    match a {
+        Ast::Col(ci) => {
+            out.insert(*ci);
+        }
+        Ast::Neg(e) => collect_expr_cols(e, out),
+        Ast::Bin(_, l, r) => {
+            collect_expr_cols(l, out);
+            collect_expr_cols(r, out);
+        }
+        Ast::Func(_, args) => args.iter().for_each(|e| collect_expr_cols(e, out)),
+        Ast::Num(_) => {}
+    }
+}
+
+fn eval_expr(a: &Ast, cols: &std::collections::HashMap<usize, Vec<f64>>, row: usize) -> f64 {
+    match a {
+        Ast::Num(n) => *n,
+        Ast::Col(ci) => cols
+            .get(ci)
+            .and_then(|v| v.get(row))
+            .copied()
+            .unwrap_or(f64::NAN),
+        Ast::Neg(e) => -eval_expr(e, cols, row),
+        Ast::Bin(c, l, r) => {
+            let a = eval_expr(l, cols, row);
+            let b = eval_expr(r, cols, row);
+            match c {
+                '+' => a + b,
+                '-' => a - b,
+                '*' => a * b,
+                '/' => a / b,
+                '^' => a.powf(b),
+                _ => f64::NAN,
+            }
+        }
+        Ast::Func(name, args) => {
+            let v: Vec<f64> = args.iter().map(|e| eval_expr(e, cols, row)).collect();
+            let x = v.first().copied().unwrap_or(f64::NAN);
+            let y = v.get(1).copied().unwrap_or(f64::NAN);
+            match name.as_str() {
+                "sqrt" => x.sqrt(),
+                "abs" => x.abs(),
+                "sin" => x.sin(),
+                "cos" => x.cos(),
+                "tan" => x.tan(),
+                "asin" => x.asin(),
+                "acos" => x.acos(),
+                "atan" => x.atan(),
+                "atan2" => x.atan2(y),
+                "hypot" => x.hypot(y),
+                "pow" => x.powf(y),
+                "exp" => x.exp(),
+                "ln" => x.ln(),
+                "log10" | "log" => x.log10(),
+                "floor" => x.floor(),
+                "ceil" => x.ceil(),
+                "round" => x.round(),
+                "sign" => x.signum(),
+                "deg" => x.to_degrees(),
+                "rad" => x.to_radians(),
+                "min" => v.iter().copied().fold(f64::INFINITY, f64::min),
+                "max" => v.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                _ => f64::NAN,
+            }
+        }
+    }
+}
+
+/// Trailing-window rolling statistic per row: rolling_mean/std/min/max over cols[0],
+/// or rolling_corr (Pearson) over cols[0] vs cols[1]. Window = last `win` rows.
+fn rolling_compute(op: &str, cols: &[Vec<f64>], win: usize, n_rows: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(n_rows);
+    for r in 0..n_rows {
+        let lo = (r + 1).saturating_sub(win);
+        let hi = r + 1;
+        let v = if op == "rolling_corr" {
+            let a = cols[0].get(lo..hi).unwrap_or(&[]);
+            let b = cols[1].get(lo..hi).unwrap_or(&[]);
+            pearson(a, b).unwrap_or(f64::NAN)
+        } else {
+            let w: Vec<f64> = cols[0]
+                .get(lo..hi)
+                .unwrap_or(&[])
+                .iter()
+                .copied()
+                .filter(|x| x.is_finite())
+                .collect();
+            if w.is_empty() {
+                f64::NAN
+            } else {
+                let m = w.iter().sum::<f64>() / w.len() as f64;
+                match op {
+                    "rolling_mean" => m,
+                    "rolling_min" => w.iter().copied().fold(f64::INFINITY, f64::min),
+                    "rolling_max" => w.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    "rolling_std" => {
+                        (w.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / w.len() as f64).sqrt()
+                    }
+                    _ => f64::NAN,
+                }
+            }
+        };
+        out.push(v);
+    }
+    out
+}
+
 /// Group a sorted list of row indices into runs (start, end, count), joining
 /// indices no more than `max_gap` apart.
 fn group_runs(rows: &[usize], max_gap: usize) -> Vec<(usize, usize, usize)> {
@@ -502,7 +796,9 @@ struct DeriveParams {
     /// (A−B), "ratio" (A/B), or "scale" (scale·col + offset).
     op: String,
     /// Source columns (names or indices). magnitude/add/mean take one or more;
-    /// subtract/ratio take exactly two; scale takes exactly one.
+    /// subtract/ratio/rolling_corr take exactly two; scale/rolling_* take one.
+    /// Omit for op "expr" (columns come from the expression).
+    #[serde(default)]
     columns: Vec<String>,
     /// Name for the new column (defaults to op + source names).
     #[serde(default)]
@@ -513,6 +809,15 @@ struct DeriveParams {
     /// For "scale": the offset (default 0).
     #[serde(default)]
     offset: Option<f64>,
+    /// For op "expr": a formula over column names, e.g.
+    /// "deg(acos(calibrated_az / total_gravity))" or "raw_ax2 - raw_ax1". Supports
+    /// + - * / ^, parentheses, and sqrt/abs/sin/cos/tan/asin/acos/atan/atan2/hypot/
+    /// pow/exp/ln/log10/floor/ceil/round/sign/deg/rad/min/max.
+    #[serde(default)]
+    expression: Option<String>,
+    /// For rolling ops (rolling_mean/std/min/max, rolling_corr): the window in rows.
+    #[serde(default)]
+    window: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1199,7 +1504,7 @@ impl OxidePlot {
     }
 
     #[tool(
-        description = "Add a computed column to a dataset. op: 'magnitude' (sqrt of sum of squares, e.g. accel magnitude from x/y/z), 'add' or 'mean' (of >=1 columns), 'subtract' (A-B) or 'ratio' (A/B) (exactly 2), or 'scale' (scale*col+offset, exactly 1). The new column is usable by describe_data / query_data / create_graph / correlate."
+        description = "Add a computed column to a dataset. op: 'magnitude' (sqrt of sum of squares), 'add'/'mean' (>=1 cols), 'subtract'(A-B)/'ratio'(A/B) (2 cols), 'scale' (scale*col+offset, 1 col), 'rolling_mean'/'rolling_std'/'rolling_min'/'rolling_max' (1 col + 'window'), 'rolling_corr' (2 cols + 'window'), or 'expr' (a free-form 'expression' over column names, e.g. deg(acos(calibrated_az/total_gravity)) — for recomputing survey math / independent checks). The new column is usable by describe_data/query_data/create_graph/correlate."
     )]
     async fn derive_column(
         &self,
@@ -1210,70 +1515,107 @@ impl OxidePlot {
             new_name,
             scale,
             offset,
+            expression,
+            window,
         }): Parameters<DeriveParams>,
     ) -> Result<CallToolResult, McpError> {
         let mut s = self.session.lock().await;
         let ds = s.datasets.get_mut(&dataset_id).ok_or_else(|| {
             McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
         })?;
-
-        let mut idxs = Vec::new();
-        for c in &columns {
-            idxs.push(resolve_col(&ds.data, c).ok_or_else(|| {
-                McpError::invalid_params(format!("unknown column '{c}'"), None)
-            })?);
-        }
-        match op.as_str() {
-            "subtract" | "ratio" if idxs.len() != 2 => {
-                return Err(McpError::invalid_params(
-                    format!("op '{op}' needs exactly 2 columns"),
-                    None,
-                ))
-            }
-            "scale" if idxs.len() != 1 => {
-                return Err(McpError::invalid_params(
-                    format!("op '{op}' needs exactly 1 column"),
-                    None,
-                ))
-            }
-            "magnitude" | "add" | "mean" if idxs.is_empty() => {
-                return Err(McpError::invalid_params(
-                    format!("op '{op}' needs at least 1 column"),
-                    None,
-                ))
-            }
-            "magnitude" | "add" | "mean" | "subtract" | "ratio" | "scale" => {}
-            other => {
-                return Err(McpError::invalid_params(
-                    format!("unknown op '{other}'"),
-                    None,
-                ))
-            }
-        }
-
-        let cols: Vec<Vec<f64>> = idxs
-            .iter()
-            .map(|&c| column_to_f64(&ds.data.column_data[c]).0)
-            .collect();
         let n_rows = ds.data.row_count;
-        let a = scale.unwrap_or(1.0);
-        let b = offset.unwrap_or(0.0);
-        let mut vals: Vec<f64> = Vec::with_capacity(n_rows);
-        for r in 0..n_rows {
-            let g = |k: usize| cols[k].get(r).copied().unwrap_or(f64::NAN);
-            let v = match op.as_str() {
-                "magnitude" => (0..cols.len()).map(|k| g(k) * g(k)).sum::<f64>().sqrt(),
-                "add" => (0..cols.len()).map(g).sum(),
-                "mean" => (0..cols.len()).map(g).sum::<f64>() / cols.len() as f64,
-                "subtract" => g(0) - g(1),
-                "ratio" => g(0) / g(1),
-                "scale" => a * g(0) + b,
-                _ => f64::NAN,
-            };
-            vals.push(v);
-        }
 
-        let name = new_name.unwrap_or_else(|| format!("{op}_{}", columns.join("_")));
+        let vals: Vec<f64> = if op == "expr" {
+            // Free-form formula over column names.
+            let formula = expression.as_deref().ok_or_else(|| {
+                McpError::invalid_params("op 'expr' needs an 'expression'".to_string(), None)
+            })?;
+            let ast = parse_expr(&ds.data, formula)
+                .map_err(|e| McpError::invalid_params(format!("expression error: {e}"), None))?;
+            let mut refs = std::collections::HashSet::new();
+            collect_expr_cols(&ast, &mut refs);
+            let colvals: std::collections::HashMap<usize, Vec<f64>> = refs
+                .iter()
+                .map(|&ci| (ci, column_to_f64(&ds.data.column_data[ci]).0))
+                .collect();
+            (0..n_rows).map(|r| eval_expr(&ast, &colvals, r)).collect()
+        } else {
+            let mut idxs = Vec::new();
+            for c in &columns {
+                idxs.push(resolve_col(&ds.data, c).ok_or_else(|| {
+                    McpError::invalid_params(format!("unknown column '{c}'"), None)
+                })?);
+            }
+            let one = ["scale", "rolling_mean", "rolling_std", "rolling_min", "rolling_max"];
+            match op.as_str() {
+                "subtract" | "ratio" | "rolling_corr" if idxs.len() != 2 => {
+                    return Err(McpError::invalid_params(
+                        format!("op '{op}' needs exactly 2 columns"),
+                        None,
+                    ))
+                }
+                o if one.contains(&o) && idxs.len() != 1 => {
+                    return Err(McpError::invalid_params(
+                        format!("op '{op}' needs exactly 1 column"),
+                        None,
+                    ))
+                }
+                "magnitude" | "add" | "mean" if idxs.is_empty() => {
+                    return Err(McpError::invalid_params(
+                        format!("op '{op}' needs at least 1 column"),
+                        None,
+                    ))
+                }
+                "magnitude" | "add" | "mean" | "subtract" | "ratio" | "scale" | "rolling_mean"
+                | "rolling_std" | "rolling_min" | "rolling_max" | "rolling_corr" => {}
+                other => {
+                    return Err(McpError::invalid_params(
+                        format!("unknown op '{other}'"),
+                        None,
+                    ))
+                }
+            }
+            let cols: Vec<Vec<f64>> = idxs
+                .iter()
+                .map(|&c| column_to_f64(&ds.data.column_data[c]).0)
+                .collect();
+
+            if op.starts_with("rolling_") {
+                let win = window.unwrap_or(0);
+                if win < 2 {
+                    return Err(McpError::invalid_params(
+                        format!("op '{op}' needs a 'window' of at least 2"),
+                        None,
+                    ));
+                }
+                rolling_compute(&op, &cols, win, n_rows)
+            } else {
+                let a = scale.unwrap_or(1.0);
+                let b = offset.unwrap_or(0.0);
+                (0..n_rows)
+                    .map(|r| {
+                        let g = |k: usize| cols[k].get(r).copied().unwrap_or(f64::NAN);
+                        match op.as_str() {
+                            "magnitude" => (0..cols.len()).map(|k| g(k) * g(k)).sum::<f64>().sqrt(),
+                            "add" => (0..cols.len()).map(g).sum(),
+                            "mean" => (0..cols.len()).map(g).sum::<f64>() / cols.len() as f64,
+                            "subtract" => g(0) - g(1),
+                            "ratio" => g(0) / g(1),
+                            "scale" => a * g(0) + b,
+                            _ => f64::NAN,
+                        }
+                    })
+                    .collect()
+            }
+        };
+
+        let name = new_name.unwrap_or_else(|| {
+            if op == "expr" {
+                format!("expr_{}", ds.data.columns.len())
+            } else {
+                format!("{op}_{}", columns.join("_"))
+            }
+        });
         let cells: Vec<String> = vals
             .iter()
             .map(|v| if v.is_finite() { format!("{v}") } else { String::new() })
@@ -1289,7 +1631,7 @@ impl OxidePlot {
             "new_column": name,
             "index": new_index,
             "op": op,
-            "from": columns,
+            "from": if op == "expr" { json!(expression) } else { json!(columns) },
             "n_rows": n_rows,
             "min": st.as_ref().map(|s| s.min),
             "max": st.as_ref().map(|s| s.max),
