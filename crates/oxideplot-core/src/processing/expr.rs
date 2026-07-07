@@ -1,5 +1,4 @@
 use crate::data::loader::{column_to_f64, resolve_col, LoadedData};
-use crate::processing::statistics::pearson;
 use std::collections::{HashMap, HashSet};
 
 // ---- Mini arithmetic expression evaluator (derive_column op="expr") ----
