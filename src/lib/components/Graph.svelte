@@ -298,6 +298,8 @@
     refreshSeriesInfo();
     if (viewMode === 'table') {
       tick().then(() => { if (tableView) tableView.refresh(); });
+    } else if (viewMode === 'dist') {
+      tick().then(() => { if (distView) distView.refresh(); });
     }
     dispatch('datachanged');
   }
