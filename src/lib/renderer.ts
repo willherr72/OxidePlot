@@ -57,6 +57,14 @@ export interface AxisTicksData {
   y: TickEntry[];
 }
 
+export interface HistogramData {
+  counts: number[];
+  bin_centers: number[];
+  min: number;
+  max: number;
+  n: number;
+}
+
 /**
  * Wrapper around the WASM `OxidePlot` GPU renderer.
  *
@@ -334,6 +342,15 @@ export class Renderer {
   setXRange(xMin: number, xMax: number): void {
     this.assertPlot();
     (this.plot as any).set_x_range(xMin, xMax);
+  }
+
+  /**
+   * Compute a histogram for the series at `sourceIndex` with `nbins` bins.
+   * Returns `{ counts, bin_centers, min, max, n }`.
+   */
+  seriesHistogram(sourceIndex: number, nbins: number): HistogramData {
+    this.assertPlot();
+    return (this.plot as any).series_histogram(sourceIndex, nbins) as HistogramData;
   }
 
   // ── Table API ─────────────────────────────────────────────────────────────
