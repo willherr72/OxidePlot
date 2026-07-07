@@ -832,6 +832,22 @@ struct SpectrumParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct HistogramParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// Numeric column (name or index) to bin.
+    column: String,
+    /// Number of bins (default 40).
+    #[serde(default)]
+    bins: Option<usize>,
+    /// Image width/height in px (defaults 640×360).
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct SpectrogramParams {
     /// Dataset id returned by load_csv.
     dataset_id: String,
@@ -1832,6 +1848,149 @@ impl OxidePlot {
             "freq_range_hz": [0.0, nyq],
             "time_range_s": [0.0, total_time],
             "note": "Heatmap: Y=frequency (0 bottom → Nyquist top), X=time (s), colour=intensity (dark=low, bright=high). A band shifting vertically over time = changing resonance.",
+        })
+        .to_string();
+        Ok(CallToolResult::success(vec![
+            Content::image(b64, "image/png".to_string()),
+            Content::text(text),
+        ]))
+    }
+
+    #[tool(
+        description = "Histogram of a numeric column — a distribution bar-chart PNG plus the bin counts. Reveals bimodality, rail-pinning/saturation, and clustering that a time-series line plot buries."
+    )]
+    async fn histogram(
+        &self,
+        Parameters(HistogramParams {
+            dataset_id,
+            column,
+            bins,
+            width,
+            height,
+        }): Parameters<HistogramParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (vals, colname) = {
+            let s = self.session.lock().await;
+            let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+            })?;
+            let ci = resolve_col(&ds.data, &column).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown column '{column}'"), None)
+            })?;
+            if !ds.numeric_cols[ci] {
+                return Err(McpError::invalid_params(
+                    format!("column '{}' is not numeric", ds.data.columns[ci]),
+                    None,
+                ));
+            }
+            (
+                column_to_f64(&ds.data.column_data[ci]).0,
+                ds.data.columns[ci].clone(),
+            )
+        };
+        let finite: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+        if finite.len() < 2 {
+            return Err(McpError::internal_error(
+                "need at least 2 finite values for a histogram".to_string(),
+                None,
+            ));
+        }
+        let nbins = bins.unwrap_or(40).clamp(2, 200);
+        let w = width.unwrap_or(640).clamp(200, 2000);
+        let h = height.unwrap_or(360).clamp(150, 1200);
+        let vmin = finite.iter().copied().fold(f64::INFINITY, f64::min);
+        let vmax = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let span = (vmax - vmin).max(1e-12);
+        let mut counts = vec![0usize; nbins];
+        for &v in &finite {
+            let bi = (((v - vmin) / span * nbins as f64) as usize).min(nbins - 1);
+            counts[bi] += 1;
+        }
+        let maxc = (*counts.iter().max().unwrap_or(&1)).max(1);
+
+        let bg = [14u8, 15, 19];
+        let barc = [235u8, 170, 70];
+        let lc = [200u8, 205, 215, 255];
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        for px in 0..(w * h) as usize {
+            let o = px * 4;
+            buf[o] = bg[0];
+            buf[o + 1] = bg[1];
+            buf[o + 2] = bg[2];
+            buf[o + 3] = 255;
+        }
+        let (ml, mr, mt, mb) = (46u32, 10u32, 12u32, 22u32);
+        let plot_w = w.saturating_sub(ml + mr).max(1);
+        let plot_h = h.saturating_sub(mt + mb).max(1);
+        for bi in 0..nbins {
+            let bar_h = (counts[bi] as f64 / maxc as f64 * plot_h as f64) as u32;
+            let x0 = ml + (bi as u32 * plot_w / nbins as u32);
+            let x1 = ml + ((bi as u32 + 1) * plot_w / nbins as u32);
+            let ytop = mt + plot_h - bar_h;
+            for py in ytop..(mt + plot_h) {
+                for px in x0..x1.min(w) {
+                    let o = ((py * w + px) * 4) as usize;
+                    buf[o] = barc[0];
+                    buf[o + 1] = barc[1];
+                    buf[o + 2] = barc[2];
+                    buf[o + 3] = 255;
+                }
+            }
+        }
+        // Baked labels: x at min/mid/max, y at 0/maxcount.
+        draw_text(&mut buf, w, h, &format_tick_value(vmin), ml as i32, (h - mb + 4) as i32, lc, 1);
+        draw_text(
+            &mut buf,
+            w,
+            h,
+            &format_tick_value((vmin + vmax) / 2.0),
+            (ml + plot_w / 2) as i32 - 12,
+            (h - mb + 4) as i32,
+            lc,
+            1,
+        );
+        draw_text(
+            &mut buf,
+            w,
+            h,
+            &format_tick_value(vmax),
+            (w - mr) as i32 - 30,
+            (h - mb + 4) as i32,
+            lc,
+            1,
+        );
+        draw_text(&mut buf, w, h, &format!("{maxc}"), 2, mt as i32, lc, 1);
+        draw_text(&mut buf, w, h, "0", 2, (mt + plot_h) as i32 - 6, lc, 1);
+
+        let img = image::RgbaImage::from_raw(w, h, buf).ok_or_else(|| {
+            McpError::internal_error("histogram buffer mis-sized".to_string(), None)
+        })?;
+        let mut png: Vec<u8> = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|e| McpError::internal_error(format!("PNG encode failed: {e}"), None))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+
+        let centers: Vec<f64> = (0..nbins)
+            .map(|i| {
+                let v = vmin + span * (i as f64 + 0.5) / nbins as f64;
+                (v * 1000.0).round() / 1000.0
+            })
+            .collect();
+        let modal = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, c)| **c)
+            .map(|(i, _)| centers[i]);
+        let text = json!({
+            "of_column": colname,
+            "n": finite.len(),
+            "min": vmin,
+            "max": vmax,
+            "bins": nbins,
+            "counts": counts,
+            "bin_centers": centers,
+            "modal_bin_center": modal,
+            "note": "Value-distribution bars. Multiple separated peaks = multimodal; a tall spike at the min or max edge = rail-pinning/saturation.",
         })
         .to_string();
         Ok(CallToolResult::success(vec![
