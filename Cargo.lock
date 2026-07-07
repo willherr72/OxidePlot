@@ -3093,7 +3093,6 @@ dependencies = [
  "oxideplot-core",
  "pollster",
  "rmcp",
- "rustfft",
  "serde",
  "serde_json",
  "tokio",

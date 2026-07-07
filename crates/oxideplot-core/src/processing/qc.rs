@@ -144,7 +144,7 @@ pub(crate) fn shift_ratio_at(vals: &[f64], onset: usize, w: usize) -> Option<(f6
 }
 
 /// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
-pub(crate) fn longest_constant_run(cells: &[String]) -> usize {
+pub fn longest_constant_run(cells: &[String]) -> usize {
     let mut best = 0usize;
     let mut cur = 0usize;
     let mut prev: Option<&str> = None;

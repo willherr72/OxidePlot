@@ -12,10 +12,7 @@ use rmcp::{
     tool, tool_handler, tool_router, transport::stdio, ErrorData as McpError, ServerHandler,
     ServiceExt,
 };
-use rustfft::num_complex::Complex;
-use rustfft::FftPlanner;
 use serde_json::json;
-use std::f64::consts::PI;
 use tokio::sync::Mutex;
 
 use oxideplot_core::data::datetime::format_timestamp;
@@ -29,6 +26,13 @@ use oxideplot_core::processing::statistics::SeriesStats;
 use oxideplot_core::render::axis::{compute_grid_lines, format_tick_value};
 use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
 use oxideplot_core::render::renderer::PlotRenderer;
+use oxideplot_core::data::loader::resolve_col;
+use oxideplot_core::processing::downsampling::minmax_envelope;
+use oxideplot_core::processing::expr::{apply_filter, collect_expr_cols, eval_expr, parse_expr, rolling_compute};
+use oxideplot_core::processing::histogram::histogram as core_histogram;
+use oxideplot_core::processing::qc::{health_check as core_health_check, longest_constant_run};
+use oxideplot_core::processing::spectral::{compute_psd, compute_spectrogram, infer_sample_rate};
+use oxideplot_core::processing::statistics::pearson;
 
 use base64::Engine as _;
 
@@ -43,127 +47,6 @@ const PALETTE: [[f32; 4]; 8] = [
     [0.10, 0.90, 0.70, 1.0],
     [1.00, 0.55, 0.80, 1.0],
 ];
-
-/// Resolve a column reference (name or numeric index string) to a column index.
-fn resolve_col(data: &LoadedData, spec: &str) -> Option<usize> {
-    if let Ok(i) = spec.parse::<usize>() {
-        if i < data.columns.len() {
-            return Some(i);
-        }
-    }
-    data.columns.iter().position(|c| c == spec)
-}
-
-/// Pearson correlation over rows where both series are finite. None if < 2 pairs
-/// or a series has zero variance.
-fn pearson(a: &[f64], b: &[f64]) -> Option<f64> {
-    let mut n = 0usize;
-    let (mut sx, mut sy) = (0.0, 0.0);
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        if x.is_finite() && y.is_finite() {
-            n += 1;
-            sx += x;
-            sy += y;
-        }
-    }
-    if n < 2 {
-        return None;
-    }
-    let (mx, my) = (sx / n as f64, sy / n as f64);
-    let (mut sxy, mut sxx, mut syy) = (0.0, 0.0, 0.0);
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        if x.is_finite() && y.is_finite() {
-            let (dx, dy) = (x - mx, y - my);
-            sxy += dx * dy;
-            sxx += dx * dx;
-            syy += dy * dy;
-        }
-    }
-    let denom = (sxx * syy).sqrt();
-    if denom == 0.0 {
-        None
-    } else {
-        Some(sxy / denom)
-    }
-}
-
-/// Infer the sample rate (Hz) from the dataset's first datetime column (1/median
-/// dt between rows). Falls back to 1.0 (freq then reads in cycles/sample).
-fn infer_sample_rate(ds: &Dataset) -> f64 {
-    for c in 0..ds.data.columns.len() {
-        if let Some((ts, frac)) = column_to_timestamps(&ds.data.column_data[c]) {
-            if frac >= 0.5 && ts.len() >= 2 {
-                let mut dts: Vec<f64> = ts
-                    .windows(2)
-                    .map(|w| w[1] - w[0])
-                    .filter(|d| d.is_finite() && *d > 0.0)
-                    .collect();
-                if !dts.is_empty() {
-                    dts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    let md = dts[dts.len() / 2];
-                    if md > 0.0 {
-                        return 1.0 / md;
-                    }
-                }
-            }
-        }
-    }
-    1.0
-}
-
-/// Hann-windowed, mean-removed FFT of `vals`, returning one-sided (frequency,
-/// power) arrays (DC bin dropped). `fs` is the sample rate in Hz.
-fn compute_psd(vals: &[f64], fs: f64) -> (Vec<f64>, Vec<f64>) {
-    let y: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
-    let n = y.len();
-    if n < 4 {
-        return (vec![], vec![]);
-    }
-    let mean = y.iter().sum::<f64>() / n as f64;
-    let mut buf: Vec<Complex<f64>> = (0..n)
-        .map(|i| {
-            let w = 0.5 - 0.5 * (2.0 * PI * i as f64 / (n as f64 - 1.0)).cos();
-            Complex::new((y[i] - mean) * w, 0.0)
-        })
-        .collect();
-    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
-    let half = n / 2;
-    let mut freqs = Vec::with_capacity(half);
-    let mut power = Vec::with_capacity(half);
-    for k in 1..half {
-        freqs.push(k as f64 * fs / n as f64);
-        power.push(buf[k].norm_sqr() / n as f64);
-    }
-    (freqs, power)
-}
-
-/// Short-time FFT magnitude matrix (`frames[frame][bin]`, bins = window/2, hop =
-/// window/2). Returns the matrix and the bin count.
-fn compute_spectrogram(vals: &[f64], window: usize) -> (Vec<Vec<f64>>, usize) {
-    let y: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
-    let w = window.clamp(16, 4096);
-    let n = y.len();
-    if n < w {
-        return (vec![], 0);
-    }
-    let hop = (w / 2).max(1);
-    let bins = w / 2;
-    let fft = FftPlanner::new().plan_fft_forward(w);
-    let hann: Vec<f64> = (0..w)
-        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / (w as f64 - 1.0)).cos())
-        .collect();
-    let mut frames: Vec<Vec<f64>> = Vec::new();
-    let mut start = 0;
-    while start + w <= n {
-        let mut buf: Vec<Complex<f64>> = (0..w)
-            .map(|i| Complex::new(y[start + i] * hann[i], 0.0))
-            .collect();
-        fft.process(&mut buf);
-        frames.push((0..bins).map(|k| buf[k].norm_sqr().sqrt()).collect());
-        start += hop;
-    }
-    (frames, bins)
-}
 
 /// Magma-like colormap: t in 0..1 -> RGB. For spectrogram intensity.
 fn heat_color(t: f64) -> [u8; 3] {
@@ -189,384 +72,6 @@ fn heat_color(t: f64) -> [u8; 3] {
     ]
 }
 
-// ---- Mini arithmetic expression evaluator (derive_column op="expr") ----
-// Supports numbers, column names, + - * / ^, parentheses, unary minus, and
-// functions: sqrt abs sin cos tan asin acos atan atan2 hypot pow exp ln log10
-// log floor ceil round sign deg rad min max.
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Rel {
-    Gt,
-    Lt,
-    Ge,
-    Le,
-    Eq,
-    Ne,
-}
-
-#[derive(Clone)]
-enum Ast {
-    Num(f64),
-    Col(usize),
-    Neg(Box<Ast>),
-    Bin(char, Box<Ast>, Box<Ast>),
-    Cmp(Rel, Box<Ast>, Box<Ast>),
-    And(Box<Ast>, Box<Ast>),
-    Or(Box<Ast>, Box<Ast>),
-    Func(String, Vec<Ast>),
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum Tok {
-    Num(f64),
-    Ident(String),
-    Op(char),
-    Cmp(Rel),
-    And,
-    Or,
-    LParen,
-    RParen,
-    Comma,
-}
-
-fn tokenize_expr(s: &str) -> Result<Vec<Tok>, String> {
-    let b = s.as_bytes();
-    let mut toks = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i] as char;
-        if c.is_whitespace() {
-            i += 1;
-        } else if c.is_ascii_digit() || c == '.' {
-            let start = i;
-            while i < b.len() {
-                let ch = b[i] as char;
-                if ch.is_ascii_digit() || ch == '.' {
-                    i += 1;
-                } else if ch == 'e' || ch == 'E' {
-                    i += 1;
-                    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
-                        i += 1;
-                    }
-                } else {
-                    break;
-                }
-            }
-            let n: f64 = s[start..i]
-                .parse()
-                .map_err(|_| format!("bad number '{}'", &s[start..i]))?;
-            toks.push(Tok::Num(n));
-        } else if c.is_alphabetic() || c == '_' {
-            let start = i;
-            while i < b.len() && ((b[i] as char).is_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            let word = &s[start..i];
-            match word.to_ascii_lowercase().as_str() {
-                "and" => toks.push(Tok::And),
-                "or" => toks.push(Tok::Or),
-                _ => toks.push(Tok::Ident(word.to_string())),
-            }
-        } else {
-            let next = if i + 1 < b.len() { b[i + 1] as char } else { '\0' };
-            match c {
-                '+' | '-' | '*' | '/' | '^' => {
-                    toks.push(Tok::Op(c));
-                    i += 1;
-                }
-                '>' if next == '=' => {
-                    toks.push(Tok::Cmp(Rel::Ge));
-                    i += 2;
-                }
-                '<' if next == '=' => {
-                    toks.push(Tok::Cmp(Rel::Le));
-                    i += 2;
-                }
-                '=' if next == '=' => {
-                    toks.push(Tok::Cmp(Rel::Eq));
-                    i += 2;
-                }
-                '!' if next == '=' => {
-                    toks.push(Tok::Cmp(Rel::Ne));
-                    i += 2;
-                }
-                '>' => {
-                    toks.push(Tok::Cmp(Rel::Gt));
-                    i += 1;
-                }
-                '<' => {
-                    toks.push(Tok::Cmp(Rel::Lt));
-                    i += 1;
-                }
-                '&' if next == '&' => {
-                    toks.push(Tok::And);
-                    i += 2;
-                }
-                '|' if next == '|' => {
-                    toks.push(Tok::Or);
-                    i += 2;
-                }
-                '(' => {
-                    toks.push(Tok::LParen);
-                    i += 1;
-                }
-                ')' => {
-                    toks.push(Tok::RParen);
-                    i += 1;
-                }
-                ',' => {
-                    toks.push(Tok::Comma);
-                    i += 1;
-                }
-                _ => return Err(format!("unexpected character '{c}'")),
-            }
-        }
-    }
-    Ok(toks)
-}
-
-struct ExprParser<'a> {
-    toks: Vec<Tok>,
-    pos: usize,
-    data: &'a LoadedData,
-}
-
-impl ExprParser<'_> {
-    fn peek(&self) -> Option<&Tok> {
-        self.toks.get(self.pos)
-    }
-    fn bump(&mut self) -> Option<Tok> {
-        let t = self.toks.get(self.pos).cloned();
-        self.pos += 1;
-        t
-    }
-    fn parse(&mut self) -> Result<Ast, String> {
-        let e = self.or_expr()?;
-        if self.pos != self.toks.len() {
-            return Err("trailing tokens in expression".to_string());
-        }
-        Ok(e)
-    }
-    fn or_expr(&mut self) -> Result<Ast, String> {
-        let mut left = self.and_expr()?;
-        while let Some(Tok::Or) = self.peek() {
-            self.pos += 1;
-            let right = self.and_expr()?;
-            left = Ast::Or(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-    fn and_expr(&mut self) -> Result<Ast, String> {
-        let mut left = self.rel_expr()?;
-        while let Some(Tok::And) = self.peek() {
-            self.pos += 1;
-            let right = self.rel_expr()?;
-            left = Ast::And(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-    fn rel_expr(&mut self) -> Result<Ast, String> {
-        let left = self.add_sub()?;
-        if let Some(Tok::Cmp(rel)) = self.peek().cloned() {
-            self.pos += 1;
-            let right = self.add_sub()?;
-            return Ok(Ast::Cmp(rel, Box::new(left), Box::new(right)));
-        }
-        Ok(left)
-    }
-    fn add_sub(&mut self) -> Result<Ast, String> {
-        let mut left = self.mul_div()?;
-        while let Some(Tok::Op(c @ ('+' | '-'))) = self.peek().cloned() {
-            self.pos += 1;
-            let right = self.mul_div()?;
-            left = Ast::Bin(c, Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-    fn mul_div(&mut self) -> Result<Ast, String> {
-        let mut left = self.unary()?;
-        while let Some(Tok::Op(c @ ('*' | '/'))) = self.peek().cloned() {
-            self.pos += 1;
-            let right = self.unary()?;
-            left = Ast::Bin(c, Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-    fn unary(&mut self) -> Result<Ast, String> {
-        match self.peek() {
-            Some(Tok::Op('-')) => {
-                self.pos += 1;
-                Ok(Ast::Neg(Box::new(self.unary()?)))
-            }
-            Some(Tok::Op('+')) => {
-                self.pos += 1;
-                self.unary()
-            }
-            _ => self.power(),
-        }
-    }
-    fn power(&mut self) -> Result<Ast, String> {
-        let base = self.atom()?;
-        if let Some(Tok::Op('^')) = self.peek() {
-            self.pos += 1;
-            let exp = self.unary()?;
-            return Ok(Ast::Bin('^', Box::new(base), Box::new(exp)));
-        }
-        Ok(base)
-    }
-    fn atom(&mut self) -> Result<Ast, String> {
-        match self.bump() {
-            Some(Tok::Num(n)) => Ok(Ast::Num(n)),
-            Some(Tok::LParen) => {
-                let e = self.or_expr()?;
-                match self.bump() {
-                    Some(Tok::RParen) => Ok(e),
-                    _ => Err("expected ')'".to_string()),
-                }
-            }
-            Some(Tok::Ident(name)) => {
-                if let Some(Tok::LParen) = self.peek() {
-                    self.pos += 1;
-                    let mut args = Vec::new();
-                    if !matches!(self.peek(), Some(Tok::RParen)) {
-                        loop {
-                            args.push(self.or_expr()?);
-                            if let Some(Tok::Comma) = self.peek() {
-                                self.pos += 1;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    match self.bump() {
-                        Some(Tok::RParen) => {}
-                        _ => return Err("expected ')' after function arguments".to_string()),
-                    }
-                    Ok(Ast::Func(name.to_ascii_lowercase(), args))
-                } else {
-                    let ci = resolve_col(self.data, &name)
-                        .ok_or_else(|| format!("unknown column '{name}'"))?;
-                    Ok(Ast::Col(ci))
-                }
-            }
-            other => Err(format!("unexpected token: {other:?}")),
-        }
-    }
-}
-
-fn parse_expr(data: &LoadedData, s: &str) -> Result<Ast, String> {
-    let toks = tokenize_expr(s)?;
-    if toks.is_empty() {
-        return Err("empty expression".to_string());
-    }
-    ExprParser {
-        toks,
-        pos: 0,
-        data,
-    }
-    .parse()
-}
-
-fn collect_expr_cols(a: &Ast, out: &mut std::collections::HashSet<usize>) {
-    match a {
-        Ast::Col(ci) => {
-            out.insert(*ci);
-        }
-        Ast::Neg(e) => collect_expr_cols(e, out),
-        Ast::Bin(_, l, r) | Ast::Cmp(_, l, r) | Ast::And(l, r) | Ast::Or(l, r) => {
-            collect_expr_cols(l, out);
-            collect_expr_cols(r, out);
-        }
-        Ast::Func(_, args) => args.iter().for_each(|e| collect_expr_cols(e, out)),
-        Ast::Num(_) => {}
-    }
-}
-
-fn eval_expr(a: &Ast, cols: &std::collections::HashMap<usize, Vec<f64>>, row: usize) -> f64 {
-    match a {
-        Ast::Num(n) => *n,
-        Ast::Col(ci) => cols
-            .get(ci)
-            .and_then(|v| v.get(row))
-            .copied()
-            .unwrap_or(f64::NAN),
-        Ast::Neg(e) => -eval_expr(e, cols, row),
-        Ast::Bin(c, l, r) => {
-            let a = eval_expr(l, cols, row);
-            let b = eval_expr(r, cols, row);
-            match c {
-                '+' => a + b,
-                '-' => a - b,
-                '*' => a * b,
-                '/' => a / b,
-                '^' => a.powf(b),
-                _ => f64::NAN,
-            }
-        }
-        Ast::Cmp(rel, l, r) => {
-            let a = eval_expr(l, cols, row);
-            let b = eval_expr(r, cols, row);
-            let t = match rel {
-                Rel::Gt => a > b,
-                Rel::Lt => a < b,
-                Rel::Ge => a >= b,
-                Rel::Le => a <= b,
-                Rel::Eq => a == b,
-                Rel::Ne => a != b,
-            };
-            if t {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        Ast::And(l, r) => {
-            if eval_expr(l, cols, row) != 0.0 && eval_expr(r, cols, row) != 0.0 {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        Ast::Or(l, r) => {
-            if eval_expr(l, cols, row) != 0.0 || eval_expr(r, cols, row) != 0.0 {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        Ast::Func(name, args) => {
-            let v: Vec<f64> = args.iter().map(|e| eval_expr(e, cols, row)).collect();
-            let x = v.first().copied().unwrap_or(f64::NAN);
-            let y = v.get(1).copied().unwrap_or(f64::NAN);
-            match name.as_str() {
-                "sqrt" => x.sqrt(),
-                "abs" => x.abs(),
-                "sin" => x.sin(),
-                "cos" => x.cos(),
-                "tan" => x.tan(),
-                "asin" => x.asin(),
-                "acos" => x.acos(),
-                "atan" => x.atan(),
-                "atan2" => x.atan2(y),
-                "hypot" => x.hypot(y),
-                "pow" => x.powf(y),
-                "exp" => x.exp(),
-                "ln" => x.ln(),
-                "log10" | "log" => x.log10(),
-                "floor" => x.floor(),
-                "ceil" => x.ceil(),
-                "round" => x.round(),
-                "sign" => x.signum(),
-                "deg" => x.to_degrees(),
-                "rad" => x.to_radians(),
-                "min" => v.iter().copied().fold(f64::INFINITY, f64::min),
-                "max" => v.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                _ => f64::NAN,
-            }
-        }
-    }
-}
-
 /// Escape a CSV field (quote if it contains a comma, quote, or newline).
 fn csv_escape(s: &str) -> String {
     if s.contains([',', '"', '\n', '\r']) {
@@ -574,216 +79,6 @@ fn csv_escape(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-/// Keep the subset of `rows` (row indices) for which the boolean `filter`
-/// expression is true (non-zero and finite). Errors on a bad expression.
-fn apply_filter(data: &LoadedData, rows: &[usize], filter: &str) -> Result<Vec<usize>, String> {
-    let ast = parse_expr(data, filter)?;
-    let mut refs = std::collections::HashSet::new();
-    collect_expr_cols(&ast, &mut refs);
-    let colvals: std::collections::HashMap<usize, Vec<f64>> = refs
-        .iter()
-        .map(|&ci| (ci, column_to_f64(&data.column_data[ci]).0))
-        .collect();
-    Ok(rows
-        .iter()
-        .copied()
-        .filter(|&r| {
-            let v = eval_expr(&ast, &colvals, r);
-            v.is_finite() && v != 0.0
-        })
-        .collect())
-}
-
-/// Trailing-window rolling statistic per row: rolling_mean/std/min/max over cols[0],
-/// or rolling_corr (Pearson) over cols[0] vs cols[1]. Window = last `win` rows.
-fn rolling_compute(op: &str, cols: &[Vec<f64>], win: usize, n_rows: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(n_rows);
-    for r in 0..n_rows {
-        let lo = (r + 1).saturating_sub(win);
-        let hi = r + 1;
-        let v = if op == "rolling_corr" {
-            let a = cols[0].get(lo..hi).unwrap_or(&[]);
-            let b = cols[1].get(lo..hi).unwrap_or(&[]);
-            pearson(a, b).unwrap_or(f64::NAN)
-        } else {
-            let w: Vec<f64> = cols[0]
-                .get(lo..hi)
-                .unwrap_or(&[])
-                .iter()
-                .copied()
-                .filter(|x| x.is_finite())
-                .collect();
-            if w.is_empty() {
-                f64::NAN
-            } else {
-                let m = w.iter().sum::<f64>() / w.len() as f64;
-                match op {
-                    "rolling_mean" => m,
-                    "rolling_min" => w.iter().copied().fold(f64::INFINITY, f64::min),
-                    "rolling_max" => w.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                    "rolling_std" => {
-                        (w.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / w.len() as f64).sqrt()
-                    }
-                    _ => f64::NAN,
-                }
-            }
-        };
-        out.push(v);
-    }
-    out
-}
-
-/// Group a sorted list of row indices into runs (start, end, count), joining
-/// indices no more than `max_gap` apart.
-fn group_runs(rows: &[usize], max_gap: usize) -> Vec<(usize, usize, usize)> {
-    let mut runs = Vec::new();
-    if rows.is_empty() {
-        return runs;
-    }
-    let (mut start, mut prev, mut count) = (rows[0], rows[0], 1usize);
-    for &r in &rows[1..] {
-        if r <= prev + max_gap + 1 {
-            prev = r;
-            count += 1;
-        } else {
-            runs.push((start, prev, count));
-            start = r;
-            prev = r;
-            count = 1;
-        }
-    }
-    runs.push((start, prev, count));
-    runs
-}
-
-/// Median and MAD (median absolute deviation) of the finite values.
-fn median_mad(vals: &[f64]) -> Option<(f64, f64)> {
-    let mut v: Vec<f64> = vals.iter().copied().filter(|x| x.is_finite()).collect();
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let med = v[v.len() / 2];
-    let mut d: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
-    d.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some((med, d[d.len() / 2]))
-}
-
-/// Narrow a changepoint (level `m0` → `m1`) to the transition row within
-/// `[lo, hi)` — the first row where a trailing-window mean crosses the midpoint.
-fn localize_changepoint(vals: &[f64], lo: usize, hi: usize, m0: f64, m1: f64) -> usize {
-    let mid = (m0 + m1) * 0.5;
-    let ascending = m1 >= m0;
-    let win = ((hi - lo) / 6).clamp(5, 300);
-    for r in lo..hi {
-        let a = r.saturating_sub(win).max(lo);
-        let s: Vec<f64> = vals[a..=r].iter().copied().filter(|v| v.is_finite()).collect();
-        if s.is_empty() {
-            continue;
-        }
-        let m = s.iter().sum::<f64>() / s.len() as f64;
-        if (ascending && m >= mid) || (!ascending && m <= mid) {
-            return r;
-        }
-    }
-    (lo + hi) / 2
-}
-
-/// Rough channel role from its name: 0 = raw source (`raw…`), 2 = derived output
-/// (calibrated/calculated/…), 1 = neutral. Used to trace a fault to its source.
-fn channel_role(name: &str) -> u8 {
-    let n = name.to_ascii_lowercase();
-    if n.starts_with("raw") {
-        return 0;
-    }
-    const DERIVED: &[&str] = &[
-        "calibrated",
-        "calculated",
-        "computed",
-        "corrected",
-        "derived",
-        "adjusted",
-    ];
-    if DERIVED.iter().any(|d| n.contains(d)) {
-        return 2;
-    }
-    1
-}
-
-/// Robust level shift at `onset`: (median_after − median_before, |shift| / MAD-noise)
-/// over a window `w` either side. Used to spot a co-occurring shift in a raw
-/// channel that didn't independently cross the changepoint threshold.
-fn shift_ratio_at(vals: &[f64], onset: usize, w: usize) -> Option<(f64, f64)> {
-    let n = vals.len();
-    if onset == 0 || onset >= n {
-        return None;
-    }
-    let lo = onset.saturating_sub(w);
-    let hi = (onset + w).min(n);
-    let before: Vec<f64> = vals[lo..onset].iter().copied().filter(|v| v.is_finite()).collect();
-    let after: Vec<f64> = vals[onset..hi].iter().copied().filter(|v| v.is_finite()).collect();
-    let (mb, db) = median_mad(&before)?;
-    let (ma, da) = median_mad(&after)?;
-    let noise = (db.max(da) * 1.4826).max(1e-9);
-    let shift = ma - mb;
-    Some((shift, shift.abs() / noise))
-}
-
-/// Longest run of consecutive identical raw cells (flags a frozen/stuck channel).
-fn longest_constant_run(cells: &[String]) -> usize {
-    let mut best = 0usize;
-    let mut cur = 0usize;
-    let mut prev: Option<&str> = None;
-    for c in cells {
-        if prev == Some(c.as_str()) {
-            cur += 1;
-        } else {
-            cur = 1;
-            prev = Some(c.as_str());
-        }
-        best = best.max(cur);
-    }
-    best
-}
-
-/// Min/max envelope decimation: split into `buckets` equal index ranges and keep
-/// each bucket's min-y AND max-y point (in x order). Unlike LTTB this NEVER drops
-/// a 1-sample spike or dropout — the extreme in each bucket is always kept.
-/// Returns up to 2×buckets points.
-fn minmax_envelope(fx: &[f64], fy: &[f64], buckets: usize) -> (Vec<f64>, Vec<f64>) {
-    let n = fx.len();
-    if buckets == 0 || n <= buckets * 2 {
-        return (fx.to_vec(), fy.to_vec());
-    }
-    let mut ox = Vec::with_capacity(buckets * 2);
-    let mut oy = Vec::with_capacity(buckets * 2);
-    for b in 0..buckets {
-        let lo = b * n / buckets;
-        let hi = ((b + 1) * n / buckets).min(n);
-        if lo >= hi {
-            continue;
-        }
-        let mut imin = lo;
-        let mut imax = lo;
-        for i in lo..hi {
-            if fy[i] < fy[imin] {
-                imin = i;
-            }
-            if fy[i] > fy[imax] {
-                imax = i;
-            }
-        }
-        let (a, c) = if imin <= imax { (imin, imax) } else { (imax, imin) };
-        ox.push(fx[a]);
-        oy.push(fy[a]);
-        if c != a {
-            ox.push(fx[c]);
-            oy.push(fy[c]);
-        }
-    }
-    (ox, oy)
 }
 
 // ─── Session state ────────────────────────────────────────────────────────────
@@ -1429,266 +724,12 @@ impl OxidePlot {
         let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
             McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
         })?;
-        let n_rows = ds.data.row_count;
-        // (severity_rank, finding); 0 = high, 1 = medium, 2 = low.
-        let mut findings: Vec<(u8, serde_json::Value)> = Vec::new();
-        // Detected changepoints (col idx, onset row, shift) — grouped + traced later.
-        let mut changepoints: Vec<(usize, usize, f64)> = Vec::new();
-
-        // Dataset-level: time-index gaps (first datetime column).
-        for c in 0..ds.data.columns.len() {
-            if let Some((ts, frac)) = column_to_timestamps(&ds.data.column_data[c]) {
-                if frac >= 0.5 && ts.len() >= 3 {
-                    let dts: Vec<f64> = ts.windows(2).map(|w| w[1] - w[0]).collect();
-                    let mut sorted: Vec<f64> =
-                        dts.iter().copied().filter(|d| d.is_finite() && *d > 0.0).collect();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                    if !sorted.is_empty() {
-                        let median = sorted[sorted.len() / 2];
-                        let (mut n_gaps, mut lost, mut first) = (0usize, 0.0, None);
-                        for (i, &d) in dts.iter().enumerate() {
-                            if d.is_finite() && d > median * 3.0 && d > median + 1e-6 {
-                                n_gaps += 1;
-                                lost += d - median;
-                                if first.is_none() {
-                                    first = Some(i);
-                                }
-                            }
-                        }
-                        if n_gaps > 0 {
-                            findings.push((1, json!({
-                                "severity": "medium", "kind": "time_gaps",
-                                "column": ds.data.columns[c],
-                                "detail": format!("{n_gaps} gap(s), ~{:.0}s of samples missing", lost),
-                                "first_gap_row": first,
-                            })));
-                        }
-                    }
-                }
-                break;
-            }
-        }
-
-        // Per numeric column checks.
-        for c in 0..ds.data.columns.len() {
-            if !ds.numeric_cols[c] {
-                continue;
-            }
-            let name = &ds.data.columns[c];
-            let cells = &ds.data.column_data[c];
-            // Skip a datetime index column (it's the time axis, not a data channel).
-            if column_to_timestamps(cells)
-                .map(|(_, f)| f >= 0.5)
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let (vals, _) = column_to_f64(cells);
-            let finite: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
-            let n_finite = finite.len();
-            let n_missing = n_rows.saturating_sub(n_finite);
-            let distinct = cells.iter().collect::<std::collections::HashSet<_>>().len();
-            let const_run = longest_constant_run(cells);
-
-            // Dead / constant.
-            if n_finite > 0 && distinct <= 1 {
-                findings.push((0, json!({ "severity": "high", "kind": "dead", "column": name, "detail": "single distinct value (dead/constant)" })));
-            } else if n_finite > 0 {
-                let n_zero = finite.iter().filter(|&&v| v == 0.0).count();
-                if n_zero as f64 / n_finite as f64 > 0.95 {
-                    findings.push((0, json!({ "severity": "high", "kind": "dead", "column": name, "detail": format!("{:.0}% zero", 100.0 * n_zero as f64 / n_finite as f64) })));
-                }
-            }
-            // Frozen (long constant run but not fully dead).
-            if distinct > 1 && (const_run as f64) > (n_rows as f64 * 0.05).max(30.0) {
-                findings.push((1, json!({ "severity": "medium", "kind": "frozen", "column": name, "detail": format!("stuck for {const_run} consecutive rows") })));
-            }
-            // Missing.
-            if n_rows > 0 && n_missing as f64 / n_rows as f64 > 0.05 {
-                findings.push((1, json!({ "severity": "medium", "kind": "missing", "column": name, "detail": format!("{:.1}% missing ({n_missing} rows)", 100.0 * n_missing as f64 / n_rows as f64) })));
-            }
-            // Outliers via robust z-score (median / MAD): isolated short runs are
-            // glitches; a long contiguous run is a regime (e.g. the stationary
-            // survey start), not a glitch — reported separately at lower severity.
-            if n_finite >= 20 {
-                if let Some((median, mad)) = median_mad(&finite) {
-                    if mad > 0.0 {
-                        let rows: Vec<usize> = vals
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, &v)| {
-                                v.is_finite() && (v - median).abs() / (1.4826 * mad) > 10.0
-                            })
-                            .map(|(r, _)| r)
-                            .collect();
-                        let mut glitch_ranges: Vec<serde_json::Value> = Vec::new();
-                        let mut glitch_count = 0usize;
-                        for (rs, re, count) in group_runs(&rows, 2) {
-                            if count <= 4 {
-                                glitch_count += count;
-                                if glitch_ranges.len() < 10 {
-                                    glitch_ranges.push(json!([rs, re]));
-                                }
-                            } else {
-                                findings.push((1, json!({ "severity": "medium", "kind": "outlier_regime", "column": name, "detail": format!("{count} consecutive out-of-range samples (a regime, not a glitch)"), "rows": [rs, re] })));
-                            }
-                        }
-                        if glitch_count > 0 {
-                            findings.push((0, json!({ "severity": "high", "kind": "glitch", "column": name, "detail": format!("{glitch_count} isolated out-of-range sample(s)"), "rows": glitch_ranges })));
-                        }
-                    }
-                }
-            }
-            // Changepoint: an adjacent-segment MEDIAN jump large vs the local
-            // MAD-noise (robust — a lone spike can't move the median), then
-            // localised to the actual transition row (finer than the segment grid).
-            if n_rows >= 60 {
-                let n_seg = (n_rows / 200).clamp(8, 40);
-                let mut meds: Vec<Option<f64>> = Vec::new();
-                let mut mads: Vec<f64> = Vec::new();
-                let mut bounds: Vec<(usize, usize)> = Vec::new();
-                for seg in 0..n_seg {
-                    let lo = seg * n_rows / n_seg;
-                    let hi = ((seg + 1) * n_rows / n_seg).min(n_rows);
-                    let sl: Vec<f64> = vals
-                        .get(lo..hi)
-                        .unwrap_or(&[])
-                        .iter()
-                        .copied()
-                        .filter(|v| v.is_finite())
-                        .collect();
-                    match median_mad(&sl) {
-                        Some((m, d)) => {
-                            meds.push(Some(m));
-                            mads.push(d);
-                        }
-                        None => meds.push(None),
-                    }
-                    bounds.push((lo, hi));
-                }
-                mads.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let scale = (if mads.is_empty() {
-                    0.0
-                } else {
-                    mads[mads.len() / 2] * 1.4826
-                })
-                .max(1e-9);
-                for seg in 1..n_seg {
-                    if let (Some(a), Some(b)) = (meds[seg - 1], meds[seg]) {
-                        if (b - a).abs() > 6.0 * scale {
-                            let onset =
-                                localize_changepoint(&vals, bounds[seg - 1].0, bounds[seg].1, a, b);
-                            changepoints.push((c, onset, b - a));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Channel-lineage tracing: cluster co-occurring changepoints into one
-        // event and attribute it to the likely raw source (naming → explicit
-        // lineage hint → co-occurrence scan of raw channels at the onset). ---
-        changepoints.sort_by_key(|cp| cp.1);
-        let tol = (n_rows / 50).max(20);
-        let mut clusters: Vec<Vec<(usize, usize, f64)>> = Vec::new();
-        for cp in changepoints {
-            match clusters.last_mut() {
-                Some(last) if cp.1 <= last.last().unwrap().1 + tol => last.push(cp),
-                _ => clusters.push(vec![cp]),
-            }
-        }
-        let raw_cols: Vec<usize> = (0..ds.data.columns.len())
-            .filter(|&c| ds.numeric_cols[c] && channel_role(&ds.data.columns[c]) == 0)
-            .collect();
-
-        for cl in &clusters {
-            let onset = cl.iter().map(|c| c.1).min().unwrap();
-            let cols_in: Vec<usize> = cl.iter().map(|c| c.0).collect();
-            let mut culprit: Vec<usize> = Vec::new();
-            // (a) raw-named columns already in the cluster.
-            for &c in &cols_in {
-                if channel_role(&ds.data.columns[c]) == 0 && !culprit.contains(&c) {
-                    culprit.push(c);
-                }
-            }
-            // (b) explicit lineage hint on any derived column in the cluster.
-            if let Some(map) = &lineage {
-                for &c in &cols_in {
-                    if let Some(sources) = map.get(&ds.data.columns[c]) {
-                        for src in sources {
-                            if let Some(si) = resolve_col(&ds.data, src) {
-                                if !culprit.contains(&si) {
-                                    culprit.push(si);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // (c) co-occurrence scan: a raw channel that shifted at the onset.
-            if culprit.is_empty() {
-                let w = tol.max(30);
-                let mut best: Option<(usize, f64)> = None;
-                for &rc in &raw_cols {
-                    if cols_in.contains(&rc) {
-                        continue;
-                    }
-                    let (rvals, _) = column_to_f64(&ds.data.column_data[rc]);
-                    if let Some((_, ratio)) = shift_ratio_at(&rvals, onset, w) {
-                        if ratio > 5.0 && best.map_or(true, |b| ratio > b.1) {
-                            best = Some((rc, ratio));
-                        }
-                    }
-                }
-                if let Some((rc, _)) = best {
-                    culprit.push(rc);
-                }
-            }
-
-            let source_traced = culprit.iter().any(|c| !cols_in.contains(c));
-            if cols_in.len() == 1 && !source_traced {
-                let name = &ds.data.columns[cols_in[0]];
-                findings.push((1, json!({ "severity": "medium", "kind": "changepoint", "column": name, "detail": format!("median shifts {:.4} at ~row {onset}", cl[0].2), "row": onset })));
-            } else {
-                let affected: Vec<&String> = cols_in.iter().map(|&c| &ds.data.columns[c]).collect();
-                let culprit_names: Vec<&String> =
-                    culprit.iter().map(|&c| &ds.data.columns[c]).collect();
-                let detail = if culprit_names.is_empty() {
-                    format!(
-                        "coincident level shift across {} channels at ~row {onset} (source unclear)",
-                        affected.len()
-                    )
-                } else {
-                    format!(
-                        "level shift at ~row {onset}; likely source: {}; affects {} channel(s)",
-                        culprit_names
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        affected.len()
-                    )
-                };
-                let sev = if culprit_names.is_empty() { 1 } else { 0 };
-                findings.push((sev, json!({
-                    "severity": if sev == 0 { "high" } else { "medium" },
-                    "kind": "regime_change_event",
-                    "onset_row": onset,
-                    "culprit": culprit_names,
-                    "affected": affected,
-                    "detail": detail,
-                })));
-            }
-        }
-
-        findings.sort_by_key(|f| f.0);
-        let list: Vec<_> = findings.into_iter().map(|f| f.1).collect();
+        let findings = core_health_check(&ds.data, &ds.numeric_cols, lineage.as_ref());
         Ok(Self::text_result(json!({
             "dataset_id": dataset_id,
-            "n_rows": n_rows,
-            "n_findings": list.len(),
-            "findings": list,
+            "n_rows": ds.data.row_count,
+            "n_findings": findings.len(),
+            "findings": serde_json::to_value(&findings).unwrap(),
         })))
     }
 
@@ -1853,7 +894,7 @@ impl OxidePlot {
                     None,
                 ));
             }
-            let fs = sample_rate.unwrap_or_else(|| infer_sample_rate(ds));
+            let fs = sample_rate.unwrap_or_else(|| infer_sample_rate(&ds.data));
             let (vals, _) = column_to_f64(&ds.data.column_data[ci]);
             let (freqs, power) = compute_psd(&vals, fs);
             (freqs, power, fs, ds.data.columns[ci].clone())
@@ -1933,7 +974,7 @@ impl OxidePlot {
                     None,
                 ));
             }
-            let fs = sample_rate.unwrap_or_else(|| infer_sample_rate(ds));
+            let fs = sample_rate.unwrap_or_else(|| infer_sample_rate(&ds.data));
             (
                 column_to_f64(&ds.data.column_data[ci]).0,
                 fs,
@@ -2061,24 +1102,19 @@ impl OxidePlot {
                 ds.data.columns[ci].clone(),
             )
         };
-        let finite: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
-        if finite.len() < 2 {
-            return Err(McpError::internal_error(
-                "need at least 2 finite values for a histogram".to_string(),
-                None,
-            ));
-        }
         let nbins = bins.unwrap_or(40).clamp(2, 200);
         let w = width.unwrap_or(640).clamp(200, 2000);
         let h = height.unwrap_or(360).clamp(150, 1200);
-        let vmin = finite.iter().copied().fold(f64::INFINITY, f64::min);
-        let vmax = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let span = (vmax - vmin).max(1e-12);
-        let mut counts = vec![0usize; nbins];
-        for &v in &finite {
-            let bi = (((v - vmin) / span * nbins as f64) as usize).min(nbins - 1);
-            counts[bi] += 1;
-        }
+        let hist = core_histogram(&vals, nbins).ok_or_else(|| {
+            McpError::internal_error(
+                "need at least 2 finite values for a histogram".to_string(),
+                None,
+            )
+        })?;
+        let counts = hist.counts;
+        let vmin = hist.min;
+        let vmax = hist.max;
+        let n = hist.n;
         let maxc = (*counts.iter().max().unwrap_or(&1)).max(1);
 
         let bg = [14u8, 15, 19];
@@ -2143,11 +1179,10 @@ impl OxidePlot {
             .map_err(|e| McpError::internal_error(format!("PNG encode failed: {e}"), None))?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
 
-        let centers: Vec<f64> = (0..nbins)
-            .map(|i| {
-                let v = vmin + span * (i as f64 + 0.5) / nbins as f64;
-                (v * 1000.0).round() / 1000.0
-            })
+        let centers: Vec<f64> = hist
+            .bin_centers
+            .iter()
+            .map(|v| (v * 1000.0).round() / 1000.0)
             .collect();
         let modal = counts
             .iter()
@@ -2156,7 +1191,7 @@ impl OxidePlot {
             .map(|(i, _)| centers[i]);
         let text = json!({
             "of_column": colname,
-            "n": finite.len(),
+            "n": n,
             "min": vmin,
             "max": vmax,
             "bins": nbins,
