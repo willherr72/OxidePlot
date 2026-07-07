@@ -96,6 +96,52 @@ pub fn downsample_for_view(
     lttb_downsample(slice_x, slice_y, max_points)
 }
 
+/// Which decimation to use when building the visible render series.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DownsampleMode {
+    MinMax,
+    Lttb,
+    None,
+}
+
+impl DownsampleMode {
+    pub fn parse(s: &str) -> DownsampleMode {
+        match s {
+            "lttb" => DownsampleMode::Lttb,
+            "none" => DownsampleMode::None,
+            _ => DownsampleMode::MinMax,
+        }
+    }
+}
+
+/// Like `downsample_for_view`, but selects the decimation strategy.
+///
+/// Windows to the exact visible X range `[view_min, view_max]` using the same
+/// `partition_point` binary search `downsample_for_view` uses, but WITHOUT that
+/// function's extra ±1 line-continuity padding: `None` mode must return exactly
+/// the in-range slice (see `none_returns_windowed_slice_untouched` below), so the
+/// bounds here are `lo = partition_point(v < view_min)`, `hi = partition_point(v <= view_max)`.
+pub fn downsample_for_view_mode(
+    x: &[f64],
+    y: &[f64],
+    view_min: f64,
+    view_max: f64,
+    max_points: usize,
+    mode: DownsampleMode,
+) -> (Vec<f64>, Vec<f64>) {
+    let lo = x.partition_point(|&v| v < view_min);
+    let hi = x.partition_point(|&v| v <= view_max);
+    let (xw, yw) = (&x[lo..hi], &y[lo..hi]);
+    if xw.len() <= max_points || max_points < 3 {
+        return (xw.to_vec(), yw.to_vec());
+    }
+    match mode {
+        DownsampleMode::None => (xw.to_vec(), yw.to_vec()),
+        DownsampleMode::Lttb => lttb_downsample(xw, yw, max_points),
+        DownsampleMode::MinMax => minmax_envelope(xw, yw, max_points / 2),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +244,52 @@ mod envelope_tests {
         let fy = [0.0, 1.0, 2.0];
         let (ox, _) = minmax_envelope(&fx, &fy, 100);
         assert_eq!(ox.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod ds_mode_tests {
+    use super::*;
+
+    fn ramp(n: usize) -> (Vec<f64>, Vec<f64>) {
+        let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let y = x.clone();
+        (x, y)
+    }
+
+    #[test]
+    fn none_returns_windowed_slice_untouched() {
+        let (x, y) = ramp(1000);
+        // window to x in [100, 200] → 101 points, no decimation
+        let (ox, _) = downsample_for_view_mode(&x, &y, 100.0, 200.0, 50, DownsampleMode::None);
+        assert_eq!(ox.first().copied(), Some(100.0));
+        assert_eq!(ox.last().copied(), Some(200.0));
+        assert_eq!(ox.len(), 101);
+    }
+
+    #[test]
+    fn minmax_keeps_spike_within_budget() {
+        let n = 5000;
+        let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut y = vec![0.0f64; n];
+        y[2500] = 1e6;
+        let (_, oy) = downsample_for_view_mode(&x, &y, 0.0, n as f64, 400, DownsampleMode::MinMax);
+        assert!(oy.iter().cloned().fold(0.0, f64::max) >= 1e6, "spike must survive minmax");
+        assert!(oy.len() <= 400, "output within the point budget");
+    }
+
+    #[test]
+    fn lttb_decimates_to_budget() {
+        let (x, y) = ramp(5000);
+        let (ox, _) = downsample_for_view_mode(&x, &y, 0.0, 5000.0, 400, DownsampleMode::Lttb);
+        assert!(ox.len() <= 400 && ox.len() > 3);
+    }
+
+    #[test]
+    fn parse_modes() {
+        assert!(matches!(DownsampleMode::parse("lttb"), DownsampleMode::Lttb));
+        assert!(matches!(DownsampleMode::parse("none"), DownsampleMode::None));
+        assert!(matches!(DownsampleMode::parse("minmax"), DownsampleMode::MinMax));
+        assert!(matches!(DownsampleMode::parse("garbage"), DownsampleMode::MinMax));
     }
 }
