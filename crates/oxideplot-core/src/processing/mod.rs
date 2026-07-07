@@ -3,6 +3,7 @@ pub mod expr;
 pub mod histogram;
 pub mod interpolation;
 pub mod math_ops;
+pub mod qc;
 pub mod statistics;
 pub mod kd_tree;
 pub mod spectral;
