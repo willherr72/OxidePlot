@@ -128,3 +128,41 @@ mod moved_tests {
         assert_eq!(d, 1.0);
     }
 }
+
+/// Value at fraction `f` (0..1) of an ascending-sorted finite slice, nearest-rank.
+/// Returns NaN for an empty slice.
+pub fn percentile(sorted: &[f64], f: f64) -> f64 {
+    if sorted.is_empty() {
+        return f64::NAN;
+    }
+    let idx = (((sorted.len() - 1) as f64) * f.clamp(0.0, 1.0)).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+#[cfg(test)]
+mod percentile_tests {
+    use super::*;
+
+    #[test]
+    fn percentile_basic() {
+        let v = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]; // sorted, len 10
+        assert_eq!(percentile(&v, 0.0), 0.0);
+        assert_eq!(percentile(&v, 1.0), 9.0);
+        // (len-1)*0.5 = 4.5 → round → index 5 → 5.0 (nearest-rank)
+        assert_eq!(percentile(&v, 0.5), 5.0);
+    }
+
+    #[test]
+    fn percentile_clips_outlier() {
+        // 99 values in [0,1] plus one huge outlier; p99 must stay near 1, not the outlier.
+        let mut v: Vec<f64> = (0..99).map(|i| i as f64 / 98.0).collect();
+        v.push(1e9);
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(percentile(&v, 0.99) < 2.0, "p99 should ignore the lone 1e9 outlier");
+    }
+
+    #[test]
+    fn percentile_empty_is_nan() {
+        assert!(percentile(&[], 0.5).is_nan());
+    }
+}
