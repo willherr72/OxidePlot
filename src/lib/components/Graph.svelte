@@ -40,6 +40,7 @@
     datachanged: void;
     droppath: { path: string };
     ready: void;
+    viewmode: void;
   }>();
 
   let canvas: HTMLCanvasElement;
@@ -344,6 +345,7 @@
     } else if (mode === 'dist') {
       distView?.refresh();
     }
+    dispatch('viewmode');
   }
 
   /** Set line width (Settings panel). */

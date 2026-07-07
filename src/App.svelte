@@ -596,6 +596,7 @@
             on:xrange={(e) => handleXRange(g.id, e.detail)}
             on:datachanged={() => handleDataChanged(g.id)}
             on:droppath={(e) => handleDropPath(g.id, e)}
+            on:viewmode={() => { setFocus(g.id); syncFromGraph(); }}
           />
           {#if graphs.length > 1}
             <button
@@ -612,7 +613,7 @@
     </div>
 
     <!-- Focused-graph panels (hidden in table mode, matching prior behavior). -->
-    {#if viewMode === 'plot' && focusedGraph}
+    {#if viewMode !== 'table' && focusedGraph}
       {#if seriesInfo.length > 0}
         <SeriesList
           series={seriesInfo}
@@ -622,7 +623,7 @@
           on:select={(e) => { focusedGraph?.setSelectedSeriesIndex(e.detail); syncFromGraph(); }}
         />
       {/if}
-      {#if showSettings}
+      {#if viewMode === 'plot' && showSettings}
         <Settings
           {lineWidth}
           {pointRadius}
@@ -870,21 +871,25 @@
     flex-direction: column;
   }
 
-  /* The vertical stack of graphs — fills the workspace; each slot flexes equally. */
+  /* The vertical stack of graphs — fills the workspace; each slot flexes equally
+     down to its min-height, then the stack scrolls once slots hit that floor. */
   .graph-stack {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
+    overflow-y: auto;
   }
 
-  /* One graph + its remove control. flex:1 → equal heights across the stack.
+  /* One graph + its remove control. flex:1 0 260px → equal heights across the
+     stack while at least one graph fits, but never squishes below 260px —
+     once more graphs are stacked than fit, the stack scrolls instead.
      position:relative anchors the remove button to this slot. The inner Graph
      renders a flex column, so make this slot a flex column too. */
   .graph-slot {
     position: relative;
-    flex: 1 1 0;
-    min-height: 0;
+    flex: 1 0 260px;
+    min-height: 260px;
     display: flex;
     flex-direction: column;
   }

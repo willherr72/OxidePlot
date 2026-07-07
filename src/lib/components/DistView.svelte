@@ -3,8 +3,9 @@
    * DistView.svelte — static SVG histogram (bar chart) for a single series.
    *
    * Analogous to TableView: pulls a snapshot from the WASM renderer on demand
-   * (no reactive WASM push) and re-renders. Not interactive — a fixed
-   * viewBox is stretched to fill the parent container via CSS.
+   * (no reactive WASM push) and re-renders. Not interactive — the viewBox
+   * tracks the container's real pixel size (via bind:clientWidth/Height) so
+   * nothing is stretched or distorted.
    */
   import { onMount } from 'svelte';
   import type { Renderer, HistogramData } from '../renderer.js';
@@ -42,16 +43,20 @@
     refresh();
   }
 
-  // ── Layout (viewBox coordinate space; stretched to fill via CSS) ──────────
-  const W = 600;
-  const H = 320;
-  const MARGIN_LEFT = 56;
-  const MARGIN_RIGHT = 12;
-  const MARGIN_TOP = 12;
-  const MARGIN_BOTTOM = 32;
-  const PLOT_W = W - MARGIN_LEFT - MARGIN_RIGHT;
-  const PLOT_H = H - MARGIN_TOP - MARGIN_BOTTOM;
+  // ── Layout (viewBox coordinate space; 1:1 with the container's real pixel
+  //    size via bind:clientWidth/Height below, so nothing is stretched) ──────
+  let W = 800;
+  let H = 400;
+  $: MARGIN_LEFT = 56;
+  $: MARGIN_RIGHT = 12;
+  $: MARGIN_TOP = 12;
+  $: MARGIN_BOTTOM = 32;
+  $: PLOT_W = W - MARGIN_LEFT - MARGIN_RIGHT;
+  $: PLOT_H = H - MARGIN_TOP - MARGIN_BOTTOM;
   const BAR_GAP = 1;
+
+  // Guard the first render before the container has been measured.
+  $: measured = W >= 10 && H >= 10;
 
   $: maxCount = data ? Math.max(0, ...data.counts) : 0;
   $: hasBars = data !== null && data.counts.length > 0 && maxCount > 0;
@@ -83,10 +88,10 @@
   }
 </script>
 
-<div class="dist-view">
+<div class="dist-view" bind:clientWidth={W} bind:clientHeight={H}>
+  {#if measured}
   <svg
     viewBox="0 0 {W} {H}"
-    preserveAspectRatio="none"
     class="dist-svg"
   >
     {#if error || data === null || !hasBars}
@@ -129,6 +134,7 @@
       <text x={MARGIN_LEFT - 6} y={MARGIN_TOP + 4} text-anchor="end" dominant-baseline="hanging" font-size="11" font-family="monospace" fill="var(--axis-text)">{yMaxLabel}</text>
     {/if}
   </svg>
+  {/if}
 </div>
 
 <style>
