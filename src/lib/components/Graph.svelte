@@ -626,6 +626,13 @@
   export function refresh(): void {
     refreshSeriesInfo();
     pullViewState();
+    // Keep the active non-plot view in sync with series changes (visibility,
+    // color, add/remove) — e.g. hiding a series must update the Dist/Spectrum
+    // overlay, not just the Plot view.
+    if (viewMode === 'table') tick().then(() => tableView?.refresh());
+    else if (viewMode === 'dist') tick().then(() => distView?.refresh());
+    else if (viewMode === 'spectrum') tick().then(() => spectrumView?.refresh());
+    else if (viewMode === 'spectrogram') tick().then(() => spectrogramView?.refresh());
   }
 
   /**

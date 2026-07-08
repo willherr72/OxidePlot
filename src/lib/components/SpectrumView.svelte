@@ -115,7 +115,9 @@
     let maxFreq = 0;
     let minLog = Infinity;
     let maxLog = -Infinity;
-    const withData = seriesLines.filter((l) => l.data !== null && l.data.freqs.length > 0);
+    // Only overlay VISIBLE series with data — hiding a series (legend eye)
+    // removes its PSD line and drops it from the shared axis, like the plot.
+    const withData = seriesLines.filter((l) => l.visible && l.data !== null && l.data.freqs.length > 0);
 
     for (const line of withData) {
       const data = line.data as SpectrumData;
