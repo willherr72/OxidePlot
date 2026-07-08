@@ -300,6 +300,11 @@ mod wasm_impl {
         y_scale: YScale,
         /// Decimation strategy used when building the visible render series.
         downsample_mode: DownsampleMode,
+        /// Large-coordinate render offset (f64). Datetime X values are epoch
+        /// seconds (~1.8e9), which exceed f32 precision; series vertices and the
+        /// view uniforms are shifted by this origin before the f32 cast so the
+        /// GPU works in a small, precise coordinate space. Set in rebuild_visible.
+        x_origin: f64,
         /// Current table query (sort, search, per-column filters, numeric_cols).
         table_query: TableQuery,
         /// Filtered + sorted row indices for the current table_query.
@@ -370,6 +375,7 @@ mod wasm_impl {
                 autoscale_mode: AutoscaleMode::MinMax,
                 y_scale: YScale::Linear,
                 downsample_mode: DownsampleMode::MinMax,
+                x_origin: 0.0,
                 table_query: TableQuery::default(),
                 table_index: vec![],
                 plotted_cols: vec![],
@@ -742,9 +748,12 @@ mod wasm_impl {
                 return;
             }
 
+            // Shift the X view bounds by the same origin used for series vertices
+            // (rebuild_visible) so epoch-second X survives the f32 cast; the origin
+            // cancels in the shader's (p - view_min)/(view_max - view_min).
             let uniforms = PlotUniforms {
-                view_min: [self.view.x_min as f32, self.view.y_min as f32],
-                view_max: [self.view.x_max as f32, self.view.y_max as f32],
+                view_min: [(self.view.x_min - self.x_origin) as f32, self.view.y_min as f32],
+                view_max: [(self.view.x_max - self.x_origin) as f32, self.view.y_max as f32],
                 resolution: [self.width as f32, self.height as f32],
                 line_width: self.line_width,
                 point_radius: self.point_radius,
@@ -1336,6 +1345,20 @@ mod wasm_impl {
             let x_min = self.view.x_min;
             let x_max = self.view.x_max;
 
+            // Large-coordinate render offset (see field docs): shift X by a stable
+            // in-range origin so epoch-second timestamps survive the f32 cast. Any
+            // X inside the data window works; the first finite X is cheapest. The
+            // same origin is applied to the view uniforms in render(), so it
+            // cancels in the shader's (p - view_min)/(view_max - view_min).
+            let x_origin = self
+                .sources
+                .iter()
+                .flat_map(|s| s.xs.iter())
+                .copied()
+                .find(|x| x.is_finite())
+                .unwrap_or(0.0);
+            self.x_origin = x_origin;
+
             self.series = self
                 .sources
                 .iter()
@@ -1377,7 +1400,7 @@ mod wasm_impl {
                                 } else {
                                     (y - src.y_min) / range
                                 };
-                                [x as f32, yn as f32]
+                                [(x - x_origin) as f32, yn as f32]
                             })
                             .collect()
                     } else if self.y_scale == YScale::Log {
@@ -1387,13 +1410,13 @@ mod wasm_impl {
                             .iter()
                             .zip(vis_y.iter())
                             .filter(|&(_, &y)| y > 0.0)
-                            .map(|(&x, &y)| [x as f32, y.log10() as f32])
+                            .map(|(&x, &y)| [(x - x_origin) as f32, y.log10() as f32])
                             .collect()
                     } else {
                         vis_x
                             .iter()
                             .zip(vis_y.iter())
-                            .map(|(&x, &y)| [x as f32, y as f32])
+                            .map(|(&x, &y)| [(x - x_origin) as f32, y as f32])
                             .collect()
                     };
 
