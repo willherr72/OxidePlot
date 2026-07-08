@@ -431,6 +431,179 @@
     });
   }
 
+  /** Draw a filled + stroked rounded rectangle path (manual — avoids relying
+   *  on the newer `CanvasRenderingContext2D.roundRect`). */
+  function drawRoundedRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  /**
+   * Capture a composite "figure" PNG: the WebGPU plot bitmap plus a 2D-canvas
+   * overlay of axis ticks/labels and a series legend, so exports look like a
+   * proper figure rather than a bare (mute) plot.
+   *
+   * Reuses `capturePng()` for the plot bitmap (the WebGPU readback already
+   * works — not reinvented here). The tick→pixel mapping mirrors
+   * `overlay/Axes.svelte`'s `xToScreen`/`yToScreen` exactly, just offset by
+   * the margins reserved for axis labels:
+   *   x: plotLeft + (value - x_min) / (x_max - x_min) * plotW
+   *   y: plotTop + (1 - (value - y_min) / (y_max - y_min)) * plotH
+   *
+   * Falls back to the bare `capturePng()` result when not in plot view, when
+   * there's no data, or when view/tick state isn't available — never throws.
+   */
+  export async function captureFigurePng(): Promise<Blob | null> {
+    if (viewMode !== 'plot' || !hasData || !viewState || !ticks || !canvas) {
+      return capturePng();
+    }
+
+    const plotBlob = await capturePng();
+    if (!plotBlob) return null;
+
+    // The plot bitmap's pixel size is the canvas's own backing-store size
+    // (canvas.width/height), set 1:1 from the CSS-pixel ResizeObserver rect
+    // (this renderer does not scale the backing store by devicePixelRatio).
+    // Axes.svelte's displayW/displayH come from the same CSS-pixel
+    // getBoundingClientRect(), so plot-bitmap pixels and tick-mapping pixels
+    // are already in the same units — no dpi rescale needed here.
+    const plotW = canvas.width;
+    const plotH = canvas.height;
+    if (plotW === 0 || plotH === 0) return plotBlob;
+
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(plotBlob);
+    } catch (_) {
+      return plotBlob; // ImageBitmap decode unsupported — fall back to the bare plot
+    }
+
+    const LEFT = 64, RIGHT = 12, TOP = 12, BOTTOM = 36;
+    const width = plotW + LEFT + RIGHT;
+    const height = plotH + TOP + BOTTOM;
+
+    const off = document.createElement('canvas');
+    off.width = width;
+    off.height = height;
+    const ctx = off.getContext('2d');
+    if (!ctx) {
+      bitmap.close?.();
+      return plotBlob;
+    }
+
+    const style = getComputedStyle(document.documentElement);
+    const readVar = (name: string, fallback: string) => {
+      const v = style.getPropertyValue(name).trim();
+      return v || fallback;
+    };
+    const bg = readVar('--bg', '#0e0f13');
+    const axisText = readVar('--axis-text', 'rgba(205, 210, 220, 0.92)');
+    const textColor = readVar('--text', '#e6e8ec');
+    const panelBg = readVar('--panel-bg-alpha', 'rgba(17, 19, 24, 0.86)');
+    const panelBorder = readVar('--border-mid', 'rgba(255, 255, 255, 0.18)');
+
+    // Background
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+
+    // Plot bitmap, offset by the left/top margins.
+    ctx.drawImage(bitmap, LEFT, TOP, plotW, plotH);
+    bitmap.close?.();
+
+    const { x_min, x_max, y_min, y_max } = viewState;
+    const TICK_FONT = '11px "SFMono-Regular", Consolas, "Courier New", monospace';
+    const TICK_LEN = 6;
+
+    ctx.strokeStyle = axisText;
+    ctx.fillStyle = axisText;
+    ctx.lineWidth = 1;
+    ctx.font = TICK_FONT;
+
+    // Y axis — major ticks only (mirrors Axes.svelte's yToScreen, offset by TOP).
+    if (y_max !== y_min) {
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      for (const t of ticks.y) {
+        if (!t.major) continue;
+        const py = TOP + (1 - (t.value - y_min) / (y_max - y_min)) * plotH;
+        if (py < TOP || py > TOP + plotH) continue;
+        ctx.beginPath();
+        ctx.moveTo(LEFT - TICK_LEN, py);
+        ctx.lineTo(LEFT, py);
+        ctx.stroke();
+        ctx.fillText(t.label, LEFT - TICK_LEN - 4, py);
+      }
+    }
+
+    // X axis — major ticks only (mirrors Axes.svelte's xToScreen, offset by LEFT).
+    if (x_max !== x_min) {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      for (const t of ticks.x) {
+        if (!t.major) continue;
+        const px = LEFT + (t.value - x_min) / (x_max - x_min) * plotW;
+        if (px < LEFT || px > LEFT + plotW) continue;
+        ctx.beginPath();
+        ctx.moveTo(px, TOP + plotH);
+        ctx.lineTo(px, TOP + plotH + TICK_LEN);
+        ctx.stroke();
+        ctx.fillText(t.label, px, TOP + plotH + TICK_LEN + 3);
+      }
+    }
+
+    // Legend — top-right inside the plot area, visible series only.
+    const visibleSeries = seriesInfo.filter(s => s.visible);
+    if (visibleSeries.length > 0) {
+      const LEGEND_FONT = '12px "SFMono-Regular", Consolas, "Courier New", monospace';
+      ctx.font = LEGEND_FONT;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+
+      const swatchSize = 10;
+      const rowH = 18;
+      const padX = 10;
+      const padY = 8;
+      const gap = 6;
+      const margin = 10; // gap from the plot's own top/right edge
+
+      let maxTextW = 0;
+      for (const s of visibleSeries) {
+        const w = ctx.measureText(s.name).width;
+        if (w > maxTextW) maxTextW = w;
+      }
+      const legendW = padX * 2 + swatchSize + gap + maxTextW;
+      const legendH = padY * 2 + visibleSeries.length * rowH;
+      const legendX = LEFT + plotW - legendW - margin;
+      const legendY = TOP + margin;
+
+      ctx.fillStyle = panelBg;
+      ctx.strokeStyle = panelBorder;
+      ctx.lineWidth = 1;
+      drawRoundedRectPath(ctx, legendX, legendY, legendW, legendH, 6);
+      ctx.fill();
+      ctx.stroke();
+
+      visibleSeries.forEach((s, i) => {
+        const rowY = legendY + padY + i * rowH + rowH / 2;
+        const [r, g, b, a] = s.color;
+        ctx.fillStyle = `rgba(${(r * 255) | 0}, ${(g * 255) | 0}, ${(b * 255) | 0}, ${a})`;
+        ctx.fillRect(legendX + padX, rowY - swatchSize / 2, swatchSize, swatchSize);
+        ctx.fillStyle = textColor;
+        ctx.fillText(s.name, legendX + padX + swatchSize + gap, rowY);
+      });
+    }
+
+    return await new Promise<Blob | null>((resolve) => {
+      off.toBlob((b) => resolve(b), 'image/png');
+    });
+  }
+
   // ── Exposed: read-only accessors for App's panels ─────────────────────────────
   /** Re-pull all of this graph's panel-facing state from the renderer.
    *  Pure pull — does NOT emit xrange, so App.syncFromGraph() calling this

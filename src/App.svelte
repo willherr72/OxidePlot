@@ -425,7 +425,7 @@
     if (!hasData || !focusedGraph) return;
     error = null;
     try {
-      const blob = await focusedGraph.capturePng();
+      const blob = await focusedGraph.captureFigurePng();
       if (!blob) {
         error = 'PNG capture returned null — the WebGPU canvas may not support toBlob.';
         return;
@@ -442,7 +442,7 @@
     if (!hasData || !focusedGraph) return;
     error = null;
     try {
-      const blob = await focusedGraph.capturePng();
+      const blob = await focusedGraph.captureFigurePng();
       if (!blob) {
         error = 'PNG capture returned null — clipboard copy unavailable.';
         return;
