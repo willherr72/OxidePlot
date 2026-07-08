@@ -74,6 +74,48 @@ pub fn load_file(path: &Path) -> Result<LoadedData, String> {
     }
 }
 
+/// Finalize a freshly-parsed table: merge adjacent Date+Time column pairs into
+/// single datetime columns, then build the `LoadedData`.
+fn finalize_loaded(
+    mut columns: Vec<String>,
+    mut column_data: Vec<Vec<String>>,
+    row_count: usize,
+) -> LoadedData {
+    merge_date_time_columns(&mut columns, &mut column_data);
+    LoadedData { columns, column_data, row_count }
+}
+
+/// Merge an adjacent date-only + time-only column pair (a common instrument-log
+/// export shape, e.g. `Date` = "07/07/2026" and `Time` = "02:55:14 PM") into a
+/// single datetime column whose cells are "date time", so it's detected and
+/// plotted as a proper timestamp axis instead of a constant date + a text time.
+fn merge_date_time_columns(columns: &mut Vec<String>, column_data: &mut Vec<Vec<String>>) {
+    use crate::data::datetime::{is_date_only_column, is_time_only_column};
+    let mut i = 0;
+    while i + 1 < columns.len() {
+        if is_date_only_column(&column_data[i]) && is_time_only_column(&column_data[i + 1]) {
+            let merged_name = format!("{} {}", columns[i].trim(), columns[i + 1].trim());
+            let merged: Vec<String> = column_data[i]
+                .iter()
+                .zip(column_data[i + 1].iter())
+                .map(|(d, t)| {
+                    let (d, t) = (d.trim(), t.trim());
+                    if d.is_empty() || t.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{d} {t}")
+                    }
+                })
+                .collect();
+            columns[i] = merged_name;
+            column_data[i] = merged;
+            columns.remove(i + 1);
+            column_data.remove(i + 1);
+        }
+        i += 1;
+    }
+}
+
 /// Parse CSV from raw bytes (core implementation).
 pub fn load_csv_from_bytes(bytes: &[u8]) -> Result<LoadedData, String> {
     let header_row = parser::detect_csv_header_from_bytes(bytes, b',', 50)?;
@@ -121,7 +163,7 @@ pub fn load_csv_from_bytes(bytes: &[u8]) -> Result<LoadedData, String> {
         }
     }
 
-    Ok(LoadedData { columns, column_data, row_count })
+    Ok(finalize_loaded(columns, column_data, row_count))
 }
 
 /// Path-based shim: read file then delegate to load_csv_from_bytes (legacy support).
@@ -194,7 +236,7 @@ pub fn load_excel_from_bytes(bytes: &[u8]) -> Result<LoadedData, String> {
         }
     }
 
-    Ok(LoadedData { columns, column_data, row_count })
+    Ok(finalize_loaded(columns, column_data, row_count))
 }
 
 /// Path-based shim: read file then delegate to load_excel_from_bytes (legacy support).
@@ -258,6 +300,20 @@ mod tests {
         let d = load_from_bytes(csv, "x.csv").unwrap();
         assert_eq!(d.columns, vec!["time".to_string(), "temp".to_string()]);
         assert_eq!(d.row_count, 2);
+    }
+
+    #[test]
+    fn merges_adjacent_date_and_12h_time_columns() {
+        // Separate Date (constant day) + 12-hour Time columns (instrument-log
+        // export shape) must merge into one non-degenerate datetime axis.
+        let csv = b"Date,Time,Temp\n07/07/2026,02:55:14 PM,21.7\n07/07/2026,02:55:15 PM,21.6\n";
+        let d = load_from_bytes(csv, "chamber.csv").unwrap();
+        assert_eq!(d.columns.len(), 2, "Date+Time should collapse to one column + Temp");
+        assert_eq!(d.columns[0], "Date Time");
+        let meta = FileMeta::from_loaded(&d);
+        assert_eq!(meta.columns[0].kind, "datetime", "merged column must be datetime");
+        let (ts, _) = column_to_timestamps(&d.column_data[0]).expect("merged col parses to timestamps");
+        assert!(ts[1] > ts[0], "merged timestamps must advance (real time axis)");
     }
 
     #[test]

@@ -20,6 +20,14 @@ pub const DATE_FORMATS: &[&str] = &[
     "%Y/%m/%d %H:%M:%S%.f",
     "%m-%d-%Y %H:%M:%S%.f",
     "%d-%m-%Y %H:%M:%S%.f",
+    // 12-hour clock with AM/PM (e.g. "07/07/2026 02:55:14 PM"), incl. the merged
+    // Date+Time form produced by merge_date_time_columns.
+    "%m/%d/%Y %I:%M:%S %p",
+    "%d/%m/%Y %I:%M:%S %p",
+    "%Y-%m-%d %I:%M:%S %p",
+    "%m/%d/%Y %I:%M %p",
+    "%d/%m/%Y %I:%M %p",
+    "%Y-%m-%d %I:%M %p",
     "%Y-%m-%d",
     "%m/%d/%Y",
     "%d/%m/%Y",
@@ -68,6 +76,46 @@ pub fn detect_date_format(values: &[String]) -> Option<&'static str> {
     }
 
     if best_score > 0.0 { best_format } else { None }
+}
+
+/// Bare time-of-day formats (no date), tried via `NaiveTime`.
+pub const TIME_FORMATS: &[&str] = &[
+    "%I:%M:%S %p", // 02:55:14 PM
+    "%I:%M %p",    // 02:55 PM
+    "%H:%M:%S%.f", // 14:55:14.123
+    "%H:%M:%S",    // 14:55:14
+    "%H:%M",       // 14:55
+];
+
+/// True when the column's non-empty values are dates WITHOUT a time component
+/// (so the column can be paired with an adjacent time-only column). Requires a
+/// high match rate to avoid false positives on numeric/text columns.
+pub fn is_date_only_column(values: &[String]) -> bool {
+    match detect_date_format(values) {
+        Some(fmt) => fmt != RFC3339_FORMAT && !fmt.contains("%H") && !fmt.contains("%I"),
+        None => false,
+    }
+}
+
+/// True when the column's non-empty values are bare times-of-day (e.g.
+/// `02:55:14 PM`). Requires >80% of the sampled values to match one format.
+pub fn is_time_only_column(values: &[String]) -> bool {
+    let sample: Vec<&str> = values
+        .iter()
+        .filter(|s| !s.is_empty())
+        .take(100)
+        .map(|s| s.as_str())
+        .collect();
+    if sample.is_empty() {
+        return false;
+    }
+    TIME_FORMATS.iter().any(|&fmt| {
+        let valid = sample
+            .iter()
+            .filter(|s| chrono::NaiveTime::parse_from_str(s, fmt).is_ok())
+            .count();
+        valid as f64 / sample.len() as f64 > 0.8
+    })
 }
 
 /// Parse a string value to a Unix timestamp (with subsecond precision) using the given format.
