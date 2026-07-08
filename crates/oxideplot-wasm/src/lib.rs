@@ -1384,7 +1384,16 @@ mod wasm_impl {
                     return Err(JsValue::from_str("formula produced no finite values"));
                 }
 
-                let col_name = if name.trim().is_empty() { expr.clone() } else { name };
+                // Ensure a unique column name — duplicates would make by-name
+                // resolution (resolve_col / recompute_plotted_cols) ambiguous and
+                // hide the newer column from the Table view.
+                let base_name = if name.trim().is_empty() { expr.clone() } else { name };
+                let mut col_name = base_name.clone();
+                let mut k = 2;
+                while data.columns.iter().any(|c| *c == col_name) {
+                    col_name = format!("{base_name} ({k})");
+                    k += 1;
+                }
                 (values, xs, ys, col_name)
             };
 
@@ -1404,6 +1413,9 @@ mod wasm_impl {
                     .map(|v| if v.is_finite() { format!("{v}") } else { String::new() })
                     .collect(),
             );
+            // Keep numeric_cols aligned with the dataset — a derived column is
+            // always numeric, so the Table view sorts it numerically (not lexically).
+            self.table_query.numeric_cols.push(true);
 
             self.sources.push(SourceSeries {
                 name: col_name,
