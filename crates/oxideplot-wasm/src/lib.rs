@@ -100,6 +100,27 @@ mod wasm_impl {
         n: usize,
     }
 
+    /// Return payload for `series_spectrum`: the power spectral density of a
+    /// source series' Y values.
+    #[derive(serde::Serialize)]
+    struct SpectrumData {
+        freqs: Vec<f64>,
+        power: Vec<f64>,
+        sample_rate: f64,
+    }
+
+    /// Return payload for `series_spectrogram`: a short-time FFT magnitude
+    /// spectrogram of a source series' Y values.
+    #[derive(serde::Serialize)]
+    struct SpectrogramData {
+        frames: Vec<Vec<f64>>,
+        bins: usize,
+        n_frames: usize,
+        sample_rate: f64,
+        nyquist: f64,
+        duration_s: f64,
+    }
+
     /// The colour palette used by `ColumnDialog` on the JS side.
     /// `add_transform` picks from this palette by series count so derived
     /// series blend visually with the source series.
@@ -117,6 +138,25 @@ mod wasm_impl {
     /// Pick a palette colour by cycling over `PALETTE` at `index`.
     fn palette_color(index: usize) -> [f32; 4] {
         PALETTE[index % PALETTE.len()]
+    }
+
+    /// Sample rate (Hz) from a series' X values: 1/median positive dt. 1.0 fallback.
+    fn sample_rate_from_xs(xs: &[f64]) -> f64 {
+        let mut dts: Vec<f64> = xs
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .filter(|d| d.is_finite() && *d > 0.0)
+            .collect();
+        if dts.is_empty() {
+            return 1.0;
+        }
+        dts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let md = dts[dts.len() / 2];
+        if md > 0.0 {
+            1.0 / md
+        } else {
+            1.0
+        }
     }
 
     /// Compute the global Y min/max over a slice of finite values.
@@ -860,6 +900,58 @@ mod wasm_impl {
                 n: h.n,
             };
             serde_wasm_bindgen::to_value(&data).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+
+        /// Return the power spectral density of the source series at
+        /// `source_index` as `{ freqs, power, sample_rate }`.
+        ///
+        /// `sample_rate` (Hz) is used if given; otherwise it is inferred from
+        /// the series' `xs` (1 / median positive dt, 1.0 fallback).
+        /// Throws (JS exception) if `source_index` is out of range or the
+        /// series has too few samples for a spectrum.
+        #[wasm_bindgen]
+        pub fn series_spectrum(&self, source_index: usize, sample_rate: Option<f64>) -> Result<JsValue, JsValue> {
+            let src = self
+                .sources
+                .get(source_index)
+                .ok_or_else(|| JsValue::from_str("source index out of range"))?;
+            let fs = sample_rate.unwrap_or_else(|| sample_rate_from_xs(&src.xs));
+            let (freqs, power) = oxideplot_core::processing::spectral::compute_psd(&src.ys, fs);
+            if freqs.is_empty() {
+                return Err(JsValue::from_str("not enough samples for a spectrum"));
+            }
+            serde_wasm_bindgen::to_value(&SpectrumData { freqs, power, sample_rate: fs })
+                .map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+
+        /// Return a short-time FFT magnitude spectrogram of the source series
+        /// at `source_index` as
+        /// `{ frames, bins, n_frames, sample_rate, nyquist, duration_s }`,
+        /// where `frames[frame][bin]` is the magnitude at that frame/bin.
+        ///
+        /// `window` is clamped to `[16, 4096]` by the core `compute_spectrogram`
+        /// call path. `sample_rate` (Hz) is used if given; otherwise it is
+        /// inferred from the series' `xs` (1 / median positive dt, 1.0
+        /// fallback). Throws (JS exception) if `source_index` is out of range
+        /// or the series has too few samples for a spectrogram.
+        #[wasm_bindgen]
+        pub fn series_spectrogram(&self, source_index: usize, window: usize, sample_rate: Option<f64>) -> Result<JsValue, JsValue> {
+            let src = self
+                .sources
+                .get(source_index)
+                .ok_or_else(|| JsValue::from_str("source index out of range"))?;
+            let fs = sample_rate.unwrap_or_else(|| sample_rate_from_xs(&src.xs));
+            let win = window.clamp(16, 4096);
+            let (frames, bins) = oxideplot_core::processing::spectral::compute_spectrogram(&src.ys, win);
+            if frames.is_empty() || bins == 0 {
+                return Err(JsValue::from_str("not enough samples for a spectrogram"));
+            }
+            let n_frames = frames.len();
+            let duration_s = n_frames as f64 * (win as f64 / 2.0) / fs;
+            serde_wasm_bindgen::to_value(&SpectrogramData {
+                frames, bins, n_frames, sample_rate: fs, nyquist: fs / 2.0, duration_s,
+            })
+            .map_err(|e| JsValue::from_str(&e.to_string()))
         }
 
         // ── Appearance settings ───────────────────────────────────────────────
