@@ -185,6 +185,13 @@ export class Renderer {
     return (this.plot as any).axis_ticks() as AxisTicksData;
   }
 
+  /** True when the plotted X axis is datetime data (spectral sample rate is then
+   *  inferred reliably, so the manual rate field is hidden). */
+  xIsTime(): boolean {
+    this.assertPlot();
+    return (this.plot as any).x_is_time() as boolean;
+  }
+
   /**
    * Set the draw mode for all existing series and re-render.
    * @param mode - one of 'lines', 'step', or 'points'

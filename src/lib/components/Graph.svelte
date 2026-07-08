@@ -82,6 +82,10 @@
 
   // ── Sample rate override for spectral views (null = infer from X) ───────────
   let sampleRate: number | null = null;
+  /** True when the X axis is datetime — the sample rate is then inferred
+   *  reliably, so the manual rate field is hidden (only shown when there's no
+   *  timestamp to infer from). */
+  let xIsTime = false;
 
   // ── Draw mode ────────────────────────────────────────────────────────────────
   type DrawMode = 'lines' | 'step' | 'points';
@@ -109,6 +113,10 @@
     try {
       viewState = renderer.viewState();
       ticks = renderer.axisTicks();
+      xIsTime = renderer.xIsTime();
+      // Datetime X infers the rate reliably; drop any stale manual override so a
+      // leftover value from previous non-time data can't silently apply.
+      if (xIsTime) sampleRate = null;
     } catch (_) {
       // renderer not ready yet
     }
@@ -724,15 +732,15 @@
       on:click={() => setViewMode('spectrogram')}
       title="Spectrogram view"
     >Spectrogram</button>
-    {#if viewMode === 'spectrum' || viewMode === 'spectrogram'}
+    {#if (viewMode === 'spectrum' || viewMode === 'spectrogram') && !xIsTime}
       <input
         class="sample-rate-input"
         type="number"
-        placeholder="auto (from X)"
+        placeholder="sample rate (Hz)"
         value={sampleRate ?? ''}
         on:input={onSampleRateInput}
         on:change={onSampleRateInput}
-        title="Sample rate override (Hz) — empty infers from X"
+        title="Sample rate (Hz) — needed for real frequency labels because this X axis has no timestamps to infer from"
       />
     {/if}
   </div>

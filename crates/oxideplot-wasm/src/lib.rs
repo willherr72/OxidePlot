@@ -660,6 +660,14 @@ mod wasm_impl {
             self.render();
         }
 
+        /// True when the plotted X axis is datetime (Unix-timestamp) data. The
+        /// frontend hides the manual sample-rate field in this case, since the
+        /// spectral sample rate is inferred reliably from the timestamp spacing.
+        #[wasm_bindgen]
+        pub fn x_is_time(&self) -> bool {
+            self.x_is_time
+        }
+
         /// Return current view bounds as a JS object `{ x_min, x_max, y_min, y_max }`.
         #[wasm_bindgen]
         pub fn view_state(&self) -> JsValue {
