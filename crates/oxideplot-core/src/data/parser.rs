@@ -69,6 +69,17 @@ pub fn detect_csv_header_from_bytes(bytes: &[u8], delimiter: u8, max_lines: usiz
         }
     }
 
+    // No clean all-string header found. Fall back to the FIRST row that matches
+    // the most-common column count — this skips a title/metadata preamble (whose
+    // rows have odd column counts) to the start of the real data block, even when
+    // that block's header has blank cells (e.g. an unnamed index/frequency
+    // column in an instrument .dat export). Better than blindly using row 0.
+    for (i, row) in rows.iter().enumerate() {
+        if row.len() == most_common {
+            return Ok(i);
+        }
+    }
+
     Ok(0)
 }
 

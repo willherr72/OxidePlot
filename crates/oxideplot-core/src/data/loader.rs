@@ -54,7 +54,7 @@ pub fn load_from_bytes(bytes: &[u8], filename: &str) -> Result<LoadedData, Strin
         .unwrap_or_default();
 
     match ext.as_str() {
-        "csv" => load_csv_from_bytes(bytes),
+        "csv" | "dat" | "txt" | "tsv" => load_csv_from_bytes(bytes),
         "xls" | "xlsx" => load_excel_from_bytes(bytes),
         _ => Err(format!("Unsupported file format: .{ext}")),
     }
@@ -68,7 +68,7 @@ pub fn load_file(path: &Path) -> Result<LoadedData, String> {
         .unwrap_or_default();
 
     match ext.as_str() {
-        "csv" => load_csv(path),
+        "csv" | "dat" | "txt" | "tsv" => load_csv(path),
         "xls" | "xlsx" => load_excel(path),
         _ => Err(format!("Unsupported file format: .{ext}")),
     }
@@ -81,6 +81,14 @@ fn finalize_loaded(
     mut column_data: Vec<Vec<String>>,
     row_count: usize,
 ) -> LoadedData {
+    // Give blank header cells a generic label (common in instrument exports where
+    // e.g. the frequency/index column is left unnamed) so they read clearly and
+    // are selectable in the column picker rather than showing as empty.
+    for (i, name) in columns.iter_mut().enumerate() {
+        if name.trim().is_empty() {
+            *name = format!("Column {}", i + 1);
+        }
+    }
     merge_date_time_columns(&mut columns, &mut column_data);
     LoadedData { columns, column_data, row_count }
 }
@@ -116,15 +124,59 @@ fn merge_date_time_columns(columns: &mut Vec<String>, column_data: &mut Vec<Vec<
     }
 }
 
-/// Parse CSV from raw bytes (core implementation).
+/// Auto-detect the field delimiter (tab, comma, semicolon, or pipe) of a
+/// delimited-text file — so generic `.dat`/`.txt`/`.tsv` exports load without
+/// specialization, and non-comma CSVs work too. Scores each candidate by how
+/// consistently it splits rows into the same number of (>1) columns, sampling
+/// from the END of the file so an instrument metadata preamble doesn't skew it.
+/// Falls back to comma.
+fn detect_delimiter(bytes: &[u8]) -> u8 {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return b',';
+    }
+    // Data rows live at the end; sample the last 40 non-empty lines.
+    let sample: Vec<&str> = lines.iter().rev().take(40).copied().collect();
+    let mut best = b',';
+    let mut best_score = 0.0_f64;
+    for &d in &[b'\t', b',', b';', b'|'] {
+        let dc = d as char;
+        let counts: Vec<usize> = sample.iter().map(|l| l.matches(dc).count() + 1).collect();
+        let max_cols = *counts.iter().max().unwrap_or(&1);
+        if max_cols <= 1 {
+            continue; // this delimiter doesn't split these rows
+        }
+        // Most common column count (>1) and how consistently it appears.
+        let mut modal = 1usize;
+        let mut modal_freq = 0usize;
+        for c in 2..=max_cols {
+            let f = counts.iter().filter(|&&x| x == c).count();
+            if f > modal_freq {
+                modal_freq = f;
+                modal = c;
+            }
+        }
+        let score = (modal_freq as f64 / counts.len() as f64) * modal as f64;
+        if score > best_score {
+            best_score = score;
+            best = d;
+        }
+    }
+    best
+}
+
+/// Parse a delimited-text file (CSV/DAT/TXT/TSV) from raw bytes, auto-detecting
+/// the delimiter (core implementation).
 pub fn load_csv_from_bytes(bytes: &[u8]) -> Result<LoadedData, String> {
-    let header_row = parser::detect_csv_header_from_bytes(bytes, b',', 50)?;
+    let delimiter = detect_delimiter(bytes);
+    let header_row = parser::detect_csv_header_from_bytes(bytes, delimiter, 50)?;
 
     let text = String::from_utf8(bytes.to_vec())
         .unwrap_or_else(|_| bytes.iter().map(|&b| b as char).collect());
 
     let mut reader = csv::ReaderBuilder::new()
-        .delimiter(b',')
+        .delimiter(delimiter)
         .has_headers(false)
         .flexible(true)
         .from_reader(text.as_bytes());
@@ -300,6 +352,28 @@ mod tests {
         let d = load_from_bytes(csv, "x.csv").unwrap();
         assert_eq!(d.columns, vec!["time".to_string(), "temp".to_string()]);
         assert_eq!(d.row_count, 2);
+    }
+
+    #[test]
+    fn loads_tab_delimited_dat_with_preamble() {
+        // QDaq-style .dat: a metadata preamble, then a tab-delimited data table.
+        // The generic loader must auto-detect the tab delimiter and skip the
+        // preamble to the 4-column (Frequency + 3 channel) data.
+        let dat = "QDaq Spectrum Analyzer\n07/07/2026  03:33:57 PM\n\n\
+Number of Channels\t3\t\t\tg RMS Calculation\n\
+Frequency, Hz\tg(rms)/Hz\n\
+\tT3 X\tT3 Y\tT3 Z\n\
+6.100000\t7.131403E-3\t6.590730E-3\t9.327743E-3\n\
+12.200351\t3.081071E-4\t5.749488E-4\t1.917445E-4\n\
+18.300702\t2.344623E-3\t1.551256E-3\t1.012578E-3\n\
+24.401052\t1.360337E-3\t5.362999E-4\t5.258780E-4\n";
+        let d = load_from_bytes(dat.as_bytes(), "scan.dat").unwrap();
+        assert_eq!(d.columns.len(), 4, "tab data table should yield 4 columns");
+        assert_eq!(d.row_count, 4, "4 numeric data rows past the preamble");
+        // Frequency + channel columns are numeric (scientific notation parses).
+        let meta = FileMeta::from_loaded(&d);
+        assert_eq!(meta.columns[0].kind, "numeric", "frequency column is numeric");
+        assert_eq!(meta.columns[1].kind, "numeric", "channel column is numeric");
     }
 
     #[test]

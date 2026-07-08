@@ -22,7 +22,7 @@ pub fn save_prefs(app: tauri::AppHandle, contents: String) -> Result<(), String>
 #[tauri::command]
 pub fn pick_file() -> Option<String> {
     rfd::FileDialog::new()
-        .add_filter("data", &["csv", "xlsx", "xls"])
+        .add_filter("data", &["csv", "dat", "txt", "tsv", "xlsx", "xls"])
         .pick_file()
         .map(|p| p.to_string_lossy().into_owned())
 }
