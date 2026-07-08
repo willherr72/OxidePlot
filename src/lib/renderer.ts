@@ -357,6 +357,20 @@ export class Renderer {
     (this.plot as any).add_transform(sourceIndex, kind, params);
   }
 
+  /** Create + plot a derived column from an expression over existing columns.
+   *  Returns the updated FileMeta (dataset now includes the new column). */
+  deriveColumn(name: string, expr: string): FileMeta {
+    this.assertPlot();
+    return (this.plot as any).derive_column(name, expr) as FileMeta;
+  }
+
+  /** Return the loaded dataset's column names, in file order (empty if no
+   *  file is loaded). Used by the formula editor's clickable column list. */
+  columnNames(): string[] {
+    this.assertPlot();
+    return (this.plot as any).column_names() as string[];
+  }
+
   /**
    * Set the view's X bounds (leaving Y unchanged), rebuild visible series,
    * and re-render.  Called by Graph.applyXRange when syncing X across graphs.

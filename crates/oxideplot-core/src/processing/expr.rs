@@ -68,6 +68,22 @@ fn tokenize_expr(s: &str) -> Result<Vec<Tok>, String> {
                 .parse()
                 .map_err(|_| format!("bad number '{}'", &s[start..i]))?;
             toks.push(Tok::Num(n));
+        } else if c == '"' {
+            // Quoted column name — allows spaces/symbols in real headers, e.g.
+            // "Temp PV °C" or "T3 X". Content is taken verbatim (resolve_col does
+            // an exact name match). Quotes are ASCII so the byte slice lands on
+            // char boundaries even with multi-byte content between them.
+            let start = i + 1;
+            i += 1;
+            while i < b.len() && b[i] != b'"' {
+                i += 1;
+            }
+            if i >= b.len() {
+                return Err("unterminated quoted column name".to_string());
+            }
+            let word = &s[start..i];
+            i += 1; // consume closing quote
+            toks.push(Tok::Ident(word.to_string()));
         } else if c.is_alphabetic() || c == '_' {
             let start = i;
             while i < b.len() && ((b[i] as char).is_alphanumeric() || b[i] == b'_') {
@@ -468,6 +484,19 @@ mod expr_tests {
     fn magnitude_via_expr() {
         let d = dataset();
         assert!((eval_all(&d, "sqrt(ax^2 + ay^2 + az^2)")[0] - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn quoted_multiword_column_names() {
+        // Real instrument headers have spaces/symbols; quotes reference them.
+        let col = |v: &str| vec![v.to_string(); 3];
+        let d = LoadedData {
+            columns: vec!["T3 X".into(), "Temp PV °C".into()],
+            column_data: vec![col("3"), col("4")],
+            row_count: 3,
+        };
+        let out = eval_all(&d, "\"T3 X\" + \"Temp PV °C\"");
+        assert!((out[0] - 7.0).abs() < 1e-9);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { pickFile, readFile, saveFile, loadPrefs, savePrefs } from './lib/api.js';
   import type { SeriesSpec, ViewState, SeriesInfoEntry } from './lib/renderer.js';
   import type { FileMeta } from './lib/renderer.js';
@@ -55,6 +55,14 @@
   let downsampleMode = 'minmax';
   /** Index of the currently-selected series row (drives the Distribution view). */
   let selectedSeriesIndex = 0;
+
+  // ── Formula column editor ("+ƒ Formula" — derive + plot a computed column) ──
+  let showFormulaEditor = false;
+  let formulaName = '';
+  let formulaExpr = '';
+  let formulaExprInput: HTMLInputElement | undefined;
+  const FORMULA_FUNCS_HINT =
+    'sqrt sin cos tan asin acos atan atan2 hypot deg rad abs ln log10 min max';
 
   /** Pull all panel-facing state from the focused graph.
    *  Reads `graphRefs[focusedId]` directly (not the reactive `focusedGraph`
@@ -316,6 +324,53 @@
   /** SeriesList mutated the focused graph's renderer (visibility/remove/move/fx). */
   function handleSeriesChange() {
     syncFromGraph();
+  }
+
+  // ── Formula column editor ────────────────────────────────────────────────────
+
+  /** Open/close the formula editor; opening resets it to a blank form. */
+  function toggleFormulaEditor() {
+    showFormulaEditor = !showFormulaEditor;
+    if (showFormulaEditor) {
+      formulaName = '';
+      formulaExpr = '';
+      error = null;
+    }
+  }
+
+  /** Insert `"name"` (quoted, so multi-word/symbol column names stay one
+   *  token) into the expression input at the cursor, or append it if the
+   *  input isn't focused. */
+  function insertColumnName(name: string) {
+    const quoted = `"${name}"`;
+    const el = formulaExprInput;
+    if (el && document.activeElement === el) {
+      const start = el.selectionStart ?? formulaExpr.length;
+      const end = el.selectionEnd ?? formulaExpr.length;
+      formulaExpr = formulaExpr.slice(0, start) + quoted + formulaExpr.slice(end);
+      const pos = start + quoted.length;
+      tick().then(() => { el.focus(); el.setSelectionRange(pos, pos); });
+    } else {
+      formulaExpr += quoted;
+    }
+  }
+
+  /** Apply the formula to the focused graph; on success close the editor and
+   *  sync panels so the new series shows up in SeriesList. */
+  function applyFormula() {
+    if (!focusedGraph) return;
+    error = null;
+    try {
+      focusedGraph.deriveColumn(formulaName, formulaExpr);
+      showFormulaEditor = false;
+      syncFromGraph();
+    } catch (e) {
+      error = `Formula failed: ${e}`;
+    }
+  }
+
+  function cancelFormula() {
+    showFormulaEditor = false;
   }
 
   onMount(async () => {
@@ -667,6 +722,60 @@
           on:yscale={handleYScale}
           on:downsamplemode={handleDownsampleMode}
         />
+      {/if}
+      {#if hasData}
+        <div class="formula-panel">
+          <button
+            class="formula-toggle"
+            class:active={showFormulaEditor}
+            on:click={toggleFormulaEditor}
+            title="Create a derived column from a formula over existing columns"
+          >
+            <span class="formula-fx">+ƒ</span>
+            Formula
+          </button>
+          {#if showFormulaEditor}
+            <div class="formula-editor">
+              <label class="formula-label">
+                Name
+                <input
+                  class="formula-input"
+                  type="text"
+                  bind:value={formulaName}
+                  placeholder="magnitude"
+                />
+              </label>
+              <label class="formula-label">
+                Expression
+                <input
+                  class="formula-input formula-expr-input"
+                  type="text"
+                  bind:value={formulaExpr}
+                  bind:this={formulaExprInput}
+                  placeholder={'sqrt("ax"^2 + "ay"^2)'}
+                />
+              </label>
+              <div class="formula-columns">
+                {#each focusedGraph.getColumnNames() as col}
+                  <button
+                    class="formula-col-chip"
+                    on:click={() => insertColumnName(col)}
+                    title={`Insert "${col}" into the expression`}
+                  >{col}</button>
+                {/each}
+              </div>
+              <div class="formula-hint">Functions: {FORMULA_FUNCS_HINT}</div>
+              <div class="formula-actions">
+                <button class="formula-cancel-btn" on:click={cancelFormula}>Cancel</button>
+                <button
+                  class="formula-apply-btn"
+                  disabled={!formulaExpr.trim()}
+                  on:click={applyFormula}
+                >Apply</button>
+              </div>
+            </div>
+          {/if}
+        </div>
       {/if}
     {/if}
   </div>
@@ -1095,5 +1204,176 @@
   .recent-item:hover {
     background: var(--recent-item-hover);
     color: var(--btn-hover-text);
+  }
+
+  /* ── Formula column editor ("+ƒ Formula") ──────────────────────────────────
+     Floating panel anchored to the workspace's bottom-right corner — SeriesList
+     owns top-right and Settings owns top-left, so this stays clear of both
+     regardless of their content height. */
+  .formula-panel {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+
+  .formula-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 10px;
+    height: 28px;
+    background: var(--panel-bg-alpha);
+    color: var(--text-dim);
+    border: 1px solid var(--border-mid);
+    border-radius: var(--radius);
+    font-family: var(--font-ui);
+    font-size: 0.76rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--shadow-panel);
+    backdrop-filter: blur(4px);
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+
+  .formula-toggle:hover {
+    background: var(--btn-hover-bg);
+    color: var(--btn-hover-text);
+  }
+
+  .formula-toggle.active {
+    background: var(--btn-active-bg);
+    color: var(--btn-active-text);
+    border-color: var(--btn-active-border);
+  }
+
+  .formula-fx {
+    font-family: var(--font-data);
+    font-style: italic;
+    font-weight: 700;
+    opacity: 0.9;
+  }
+
+  .formula-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 280px;
+    padding: 10px;
+    background: var(--panel-bg-alpha);
+    border: 1px solid var(--border-mid);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-panel);
+    backdrop-filter: blur(4px);
+  }
+
+  .formula-label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    color: var(--settings-label);
+  }
+
+  .formula-input {
+    background: var(--btn-bg);
+    color: var(--text);
+    border: 1px solid var(--btn-border);
+    border-radius: var(--radius-sm);
+    padding: 5px 7px;
+    font-family: var(--font-data);
+    font-size: 0.78rem;
+  }
+
+  .formula-expr-input {
+    font-style: normal;
+  }
+
+  .formula-input:focus {
+    outline: 1px solid var(--btn-active-border);
+    outline-offset: 1px;
+  }
+
+  .formula-columns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-height: 96px;
+    overflow-y: auto;
+  }
+
+  .formula-col-chip {
+    background: var(--btn-bg);
+    color: var(--text-dim);
+    border: 1px solid var(--btn-border);
+    border-radius: var(--radius-sm);
+    padding: 2px 7px;
+    font-family: var(--font-data);
+    font-size: 0.72rem;
+    cursor: pointer;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+
+  .formula-col-chip:hover {
+    background: var(--series-ctrl-hover-bg);
+    color: var(--btn-hover-text);
+    border-color: var(--accent-dim);
+  }
+
+  .formula-hint {
+    font-family: var(--font-data);
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .formula-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .formula-cancel-btn {
+    background: var(--btn-cancel-bg);
+    color: var(--btn-cancel-text);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 4px 12px;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+
+  .formula-cancel-btn:hover {
+    opacity: 0.85;
+  }
+
+  .formula-apply-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 4px 14px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.12s;
+  }
+
+  .formula-apply-btn:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+
+  .formula-apply-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 </style>

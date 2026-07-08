@@ -436,6 +436,38 @@
     dispatch('datachanged');
   }
 
+  /**
+   * Create a derived column from `expr` (a formula over existing columns —
+   * see the `+ƒ Formula` editor in App.svelte) and plot it against the
+   * current X axis. Throws (propagates the WASM error) if there's no data
+   * loaded, no series plotted yet, or the expression is invalid/empty.
+   */
+  export function deriveColumn(name: string, expr: string): void {
+    renderer.deriveColumn(name, expr);
+    refreshView();
+    refreshSeriesInfo();
+    if (viewMode === 'table') {
+      tick().then(() => { if (tableView) tableView.refresh(); });
+    } else if (viewMode === 'dist') {
+      tick().then(() => { if (distView) distView.refresh(); });
+    } else if (viewMode === 'spectrum') {
+      tick().then(() => { if (spectrumView) spectrumView.refresh(); });
+    } else if (viewMode === 'spectrogram') {
+      tick().then(() => { if (spectrogramView) spectrogramView.refresh(); });
+    }
+    dispatch('datachanged');
+  }
+
+  /** Column names of the loaded dataset, in file order (empty if no file is
+   *  loaded). Used by the `+ƒ Formula` editor's clickable column list. */
+  export function getColumnNames(): string[] {
+    try {
+      return renderer.columnNames();
+    } catch (_) {
+      return [];
+    }
+  }
+
   // ── Exposed: toolbar actions targeting this graph ────────────────────────────
   /** Re-fit the view to all data (Fit button / double-click). */
   export function fit(): void {

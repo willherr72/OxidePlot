@@ -28,7 +28,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use serde::{Deserialize, Serialize};
     use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
     use oxideplot_core::render::renderer::PlotRenderer;
@@ -36,6 +36,7 @@ mod wasm_impl {
     use oxideplot_core::data::table::{ColFilter, TableQuery, compute_view_index, window_rows};
     use oxideplot_core::processing::downsampling::{DownsampleMode, downsample_for_view_mode};
     use oxideplot_core::processing::statistics::percentile;
+    use oxideplot_core::processing::expr::{parse_expr, collect_expr_cols, eval_expr};
     use oxideplot_core::state::plot_view::PlotViewState;
     use oxideplot_core::geom::{Pos2, Rect};
     use oxideplot_core::render::axis::{compute_grid_lines, format_tick_value};
@@ -1308,6 +1309,128 @@ mod wasm_impl {
             // auto_fit calls rebuild_visible + render — new series is immediately visible.
             self.auto_fit();
             Ok(())
+        }
+
+        // ── Formula columns ───────────────────────────────────────────────────
+
+        /// Create a new derived column from an arithmetic/logical expression
+        /// over existing columns (see `oxideplot_core::processing::expr` for
+        /// grammar — e.g. `sqrt("raw_ax"^2 + "raw_ay"^2 + "raw_az"^2)`),
+        /// append it to the loaded dataset, and plot it against the current
+        /// X axis (the `x_name` of `self.sources[0]`).
+        ///
+        /// `name` — the new column's name; falls back to `expr` if blank.
+        /// `expr` — the formula string, parsed by `parse_expr`.
+        ///
+        /// Returns the updated `FileMeta` (dataset now includes the new
+        /// column), serialized the same way `load_file_bytes` returns its.
+        #[wasm_bindgen]
+        pub fn derive_column(&mut self, name: String, expr: String) -> Result<JsValue, JsValue> {
+            // A formula column plots against the current X — need an existing
+            // series to know what that X axis is.
+            let x_name = self.sources.first().map(|s| s.x_name.clone()).ok_or_else(|| {
+                JsValue::from_str(
+                    "Plot at least one series first — a formula column needs an X axis.",
+                )
+            })?;
+
+            // ── Immutable phase: evaluate the expression + read X, producing
+            // only owned Vecs, so the borrow of `self.loaded` ends here and we
+            // can re-borrow mutably below to append the new column/series.
+            // `values` is one entry per data row (row-aligned, for the
+            // appended column_data); `xs`/`ys` are the finite-pair-filtered
+            // subset used for the plotted series.
+            let (values, xs, ys, col_name) = {
+                let data = self
+                    .loaded
+                    .as_ref()
+                    .ok_or_else(|| JsValue::from_str("No file loaded."))?;
+
+                let ast = parse_expr(data, &expr).map_err(|e| JsValue::from_str(&e))?;
+                let mut refs = HashSet::new();
+                collect_expr_cols(&ast, &mut refs);
+                let colvals: HashMap<usize, Vec<f64>> = refs
+                    .iter()
+                    .filter(|&&ci| ci < data.column_data.len())
+                    .map(|&ci| (ci, column_to_f64(&data.column_data[ci]).0))
+                    .collect();
+                let values: Vec<f64> = (0..data.row_count)
+                    .map(|r| eval_expr(&ast, &colvals, r))
+                    .collect();
+
+                // Resolve the current X column name to its file-column index,
+                // then read it as X exactly like set_series: datetime first,
+                // f64 fallback.
+                let x_col_idx = data
+                    .columns
+                    .iter()
+                    .position(|c| c == &x_name)
+                    .ok_or_else(|| JsValue::from_str("current X column not found in loaded data"))?;
+                let x_col_data = &data.column_data[x_col_idx];
+                let x_vals: Vec<f64> = if let Some((ts, _)) = column_to_timestamps(x_col_data) {
+                    ts
+                } else {
+                    column_to_f64(x_col_data).0
+                };
+
+                let (xs, ys): (Vec<f64>, Vec<f64>) = x_vals
+                    .iter()
+                    .zip(values.iter())
+                    .filter(|(&x, &y)| x.is_finite() && y.is_finite())
+                    .map(|(&x, &y)| (x, y))
+                    .unzip();
+
+                if xs.is_empty() {
+                    return Err(JsValue::from_str("formula produced no finite values"));
+                }
+
+                let col_name = if name.trim().is_empty() { expr.clone() } else { name };
+                (values, xs, ys, col_name)
+            };
+
+            // Color + Y bounds only touch `self.sources`, not `self.loaded` —
+            // safe to compute before the mutable re-borrow below too.
+            let color = palette_color(self.sources.len());
+            let (y_min, y_max) = compute_y_bounds(&ys);
+
+            // ── Mutable phase: append the derived column to the dataset (so
+            // it shows up in the column list / Table view) and push a plotted
+            // series for it, mirroring add_transform's tail.
+            let data = self.loaded.as_mut().unwrap();
+            data.columns.push(col_name.clone());
+            data.column_data.push(
+                values
+                    .iter()
+                    .map(|v| if v.is_finite() { format!("{v}") } else { String::new() })
+                    .collect(),
+            );
+
+            self.sources.push(SourceSeries {
+                name: col_name,
+                x_name,
+                visible: true,
+                xs,
+                ys,
+                color,
+                draw_mode: DrawMode::Lines,
+                y_min,
+                y_max,
+            });
+
+            self.recompute_plotted_cols();
+            self.rebuild_visible();
+            self.render();
+
+            let meta = FileMeta::from_loaded(self.loaded.as_ref().unwrap());
+            serde_wasm_bindgen::to_value(&meta).map_err(|e| JsValue::from_str(&e.to_string()))
+        }
+
+        /// Return the loaded dataset's column names, in file order (empty if
+        /// no file is loaded). Used by the formula editor UI to offer a
+        /// clickable list of column names to insert into an expression.
+        #[wasm_bindgen]
+        pub fn column_names(&self) -> Vec<String> {
+            self.loaded.as_ref().map(|d| d.columns.clone()).unwrap_or_default()
         }
 
         // ── X-range sync (Task 4) ─────────────────────────────────────────────
