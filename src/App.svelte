@@ -1212,9 +1212,10 @@
      regardless of their content height. */
   .formula-panel {
     position: absolute;
-    /* Top-left so it never covers the X-axis labels at the bottom of the plot.
-       Settings also lives top-left (plot mode only); shift right of it then. */
-    top: 8px;
+    /* Below the per-graph view-tabs strip (~34px) and above the X-axis labels,
+       on the left. Settings also lives top-left (plot mode only) — shift right
+       of it when it's open. */
+    top: 44px;
     left: 8px;
     z-index: 20;
     display: flex;
