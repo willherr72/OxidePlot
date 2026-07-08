@@ -1331,6 +1331,27 @@ mod wasm_impl {
             self.render();
         }
 
+        /// Set the full view bounds (X and Y) directly, then rebuild + render.
+        /// Used by the rubber-band zoom box. Bounds are in the same view space
+        /// that `view_state` reports (log space when Y-scale is Log), so the
+        /// frontend can derive them from a screen rectangle. Rejects
+        /// degenerate/inverted spans on either axis.
+        #[wasm_bindgen]
+        pub fn set_view_bounds(&mut self, x_min: f64, x_max: f64, y_min: f64, y_max: f64) {
+            if !x_min.is_finite() || !x_max.is_finite() || x_min >= x_max {
+                return;
+            }
+            if !y_min.is_finite() || !y_max.is_finite() || y_min >= y_max {
+                return;
+            }
+            self.view.x_min = x_min;
+            self.view.x_max = x_max;
+            self.view.y_min = y_min;
+            self.view.y_max = y_max;
+            self.rebuild_visible();
+            self.render();
+        }
+
         // ── Private helpers ───────────────────────────────────────────────────
 
         /// Rebuild `self.series` by LTTB-downsampling each source series to the

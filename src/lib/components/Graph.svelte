@@ -99,14 +99,42 @@
   let cursorMode = false;
   let cursors: CursorPoint[] = [];
 
-  // ── Pan state ────────────────────────────────────────────────────────────────
-  let dragging = false;
+  // ── Drag state ───────────────────────────────────────────────────────────────
+  // Left-drag draws a rubber-band ZOOM box (with X/Y/box axis snapping); right-drag
+  // PANS. Wheel scrolls the stack / Ctrl+wheel zooms; double-click fits.
+  type DragMode = 'none' | 'pan' | 'zoom';
+  let dragMode: DragMode = 'none';
   let lastPx = 0;
   let lastPy = 0;
   // Track pointer-down CSS position for click-vs-drag discrimination
   let pointerDownCssX = 0;
   let pointerDownCssY = 0;
   const CLICK_THRESHOLD_PX = 4;
+  // Rubber-band zoom box (CSS px, canvas-relative) + its snapped axis.
+  let zoomBox: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  let zoomSnap: 'x' | 'y' | 'box' = 'box';
+  // Within ~20° of an axis, the drag snaps to that axis only; more diagonal = box.
+  const SNAP_TAN = Math.tan((20 * Math.PI) / 180);
+  /** Overlay rectangle (CSS px) for the current zoom box, shaped by the snap. */
+  $: zoomRect = zoomBox && canvas ? computeZoomRect(zoomBox, zoomSnap) : null;
+  function computeZoomRect(
+    box: { x0: number; y0: number; x1: number; y1: number },
+    snap: 'x' | 'y' | 'box',
+  ): { left: number; top: number; width: number; height: number } {
+    const r = canvas.getBoundingClientRect();
+    if (snap === 'x') {
+      return { left: Math.min(box.x0, box.x1), top: 0, width: Math.abs(box.x1 - box.x0), height: r.height };
+    }
+    if (snap === 'y') {
+      return { left: 0, top: Math.min(box.y0, box.y1), width: r.width, height: Math.abs(box.y1 - box.y0) };
+    }
+    return {
+      left: Math.min(box.x0, box.x1),
+      top: Math.min(box.y0, box.y1),
+      width: Math.abs(box.x1 - box.x0),
+      height: Math.abs(box.y1 - box.y0),
+    };
+  }
 
   // ── View refresh ─────────────────────────────────────────────────────────────
   /** Pull view state from the renderer without emitting any events.
@@ -160,62 +188,113 @@
   function onPointerDown(e: PointerEvent) {
     // Ask App to focus this graph regardless of button.
     dispatch('focusrequest');
-    if (e.button !== 0) return; // left button only — don't pan on right/middle click
-    dragging = true;
-    const { sx, sy } = pixelScale();
     const rect = canvas.getBoundingClientRect();
-    // CSS px position (for click-vs-drag threshold)
     pointerDownCssX = e.clientX - rect.left;
     pointerDownCssY = e.clientY - rect.top;
-    // Backing-pixel position for pan
-    lastPx = pointerDownCssX * sx;
-    lastPy = pointerDownCssY * sy;
-    canvas.setPointerCapture(e.pointerId);
-  }
 
-  function onPointerMove(e: PointerEvent) {
-    if (!dragging) return;
-    const { sx, sy } = pixelScale();
-    const rect = canvas.getBoundingClientRect();
-    const curX = (e.clientX - rect.left) * sx;
-    const curY = (e.clientY - rect.top) * sy;
-    const dx = curX - lastPx;
-    const dy = curY - lastPy;
-    lastPx = curX;
-    lastPy = curY;
-    renderer.pan(dx, dy);
-    refreshView();
-  }
-
-  function onPointerUp(e: PointerEvent) {
-    if (!dragging) return;
-    dragging = false;
-
-    // Click-vs-drag: if movement in CSS px is below threshold AND cursorMode is on,
-    // treat as a cursor placement click.
-    const rect = canvas.getBoundingClientRect();
-    const upCssX = e.clientX - rect.left;
-    const upCssY = e.clientY - rect.top;
-    const moveDist = Math.sqrt(
-      (upCssX - pointerDownCssX) ** 2 + (upCssY - pointerDownCssY) ** 2
-    );
-
-    if (cursorMode && moveDist < CLICK_THRESHOLD_PX && viewState) {
-      // Convert CSS px → data coordinates using pointer-DOWN position
-      const dataX = viewState.x_min + (pointerDownCssX / rect.width) * (viewState.x_max - viewState.x_min);
-      const dataY = viewState.y_min + (1 - pointerDownCssY / rect.height) * (viewState.y_max - viewState.y_min);
-
-      if (cursors.length >= 2) {
-        // Cycle: reset to a single new cursor
-        cursors = [{ x: dataX, y: dataY }];
-      } else {
-        cursors = [...cursors, { x: dataX, y: dataY }];
-      }
+    if (e.button === 2) {
+      // Right button → PAN. Track backing-pixel position for the pan delta.
+      e.preventDefault();
+      dragMode = 'pan';
+      const { sx, sy } = pixelScale();
+      lastPx = pointerDownCssX * sx;
+      lastPy = pointerDownCssY * sy;
+      canvas.setPointerCapture(e.pointerId);
+    } else if (e.button === 0) {
+      // Left button → ZOOM box (or, in cursor mode, a cursor-placement click,
+      // resolved in onPointerUp). No box until the pointer leaves the dead zone.
+      dragMode = 'zoom';
+      zoomBox = null;
+      canvas.setPointerCapture(e.pointerId);
     }
   }
 
+  function onPointerMove(e: PointerEvent) {
+    if (dragMode === 'none') return;
+    const rect = canvas.getBoundingClientRect();
+    const cssX = e.clientX - rect.left;
+    const cssY = e.clientY - rect.top;
+
+    if (dragMode === 'pan') {
+      const { sx, sy } = pixelScale();
+      const curX = cssX * sx;
+      const curY = cssY * sy;
+      renderer.pan(curX - lastPx, curY - lastPy);
+      lastPx = curX;
+      lastPy = curY;
+      refreshView();
+    } else if (dragMode === 'zoom' && !cursorMode) {
+      // Update the rubber band + snapped axis (nothing until past the dead zone).
+      const dx = Math.abs(cssX - pointerDownCssX);
+      const dy = Math.abs(cssY - pointerDownCssY);
+      if (dx < CLICK_THRESHOLD_PX && dy < CLICK_THRESHOLD_PX) {
+        zoomBox = null;
+        return;
+      }
+      if (dy <= dx * SNAP_TAN) zoomSnap = 'x'; // mostly horizontal → X-only band
+      else if (dx <= dy * SNAP_TAN) zoomSnap = 'y'; // mostly vertical → Y-only band
+      else zoomSnap = 'box';
+      zoomBox = { x0: pointerDownCssX, y0: pointerDownCssY, x1: cssX, y1: cssY };
+    }
+  }
+
+  function onPointerUp(e: PointerEvent) {
+    if (dragMode === 'none') return;
+    const mode = dragMode;
+    dragMode = 'none';
+    const rect = canvas.getBoundingClientRect();
+    const upCssX = e.clientX - rect.left;
+    const upCssY = e.clientY - rect.top;
+
+    if (mode === 'pan') return;
+
+    // mode === 'zoom'
+    const box = zoomBox;
+    zoomBox = null;
+
+    // Cursor mode: a left click/drag places a measurement cursor (no zoom).
+    if (cursorMode && viewState) {
+      const dataX = viewState.x_min + (pointerDownCssX / rect.width) * (viewState.x_max - viewState.x_min);
+      const dataY = viewState.y_min + (1 - pointerDownCssY / rect.height) * (viewState.y_max - viewState.y_min);
+      cursors = cursors.length >= 2 ? [{ x: dataX, y: dataY }] : [...cursors, { x: dataX, y: dataY }];
+      return;
+    }
+
+    // Below the threshold (or no box / no view) → treat as a click, do nothing.
+    const moved = Math.hypot(upCssX - pointerDownCssX, upCssY - pointerDownCssY);
+    if (moved < CLICK_THRESHOLD_PX || !box || !viewState) return;
+
+    // Commit the zoom: map the box corners to data coords and set the view. Only
+    // the snapped axis(es) change; the other keeps the current view range.
+    const w = rect.width;
+    const h = rect.height;
+    const { x_min: vx0, x_max: vx1, y_min: vy0, y_max: vy1 } = viewState;
+    const dataX = (cx: number) => vx0 + (cx / w) * (vx1 - vx0);
+    const dataY = (cy: number) => vy0 + (1 - cy / h) * (vy1 - vy0);
+
+    let nx0 = vx0;
+    let nx1 = vx1;
+    let ny0 = vy0;
+    let ny1 = vy1;
+    if (zoomSnap === 'x' || zoomSnap === 'box') {
+      const a = dataX(box.x0);
+      const b = dataX(box.x1);
+      nx0 = Math.min(a, b);
+      nx1 = Math.max(a, b);
+    }
+    if (zoomSnap === 'y' || zoomSnap === 'box') {
+      const a = dataY(box.y0);
+      const b = dataY(box.y1);
+      ny0 = Math.min(a, b);
+      ny1 = Math.max(a, b);
+    }
+    renderer.setViewBounds(nx0, nx1, ny0, ny1);
+    refreshView();
+  }
+
   function onPointerCancel(_e: PointerEvent) {
-    dragging = false;
+    dragMode = 'none';
+    zoomBox = null;
   }
 
   function onWheel(e: WheelEvent) {
@@ -790,7 +869,15 @@
     on:pointercancel={onPointerCancel}
     on:wheel={onWheel}
     on:dblclick={onDblClick}
+    on:contextmenu={(e) => e.preventDefault()}
   ></canvas>
+  {#if zoomRect}
+    <div
+      class="zoom-box"
+      style="left:{zoomRect.left}px; top:{zoomRect.top}px; width:{zoomRect.width}px; height:{zoomRect.height}px"
+      aria-hidden="true"
+    ></div>
+  {/if}
   <Axes
     {ticks}
     {viewState}
@@ -901,11 +988,16 @@
     display: block;
     width: 100%;
     height: 100%;
-    cursor: grab;
+    cursor: crosshair; /* left-drag draws a zoom box; right-drag pans */
   }
 
-  canvas:active {
-    cursor: grabbing;
+  /* Rubber-band zoom box (left-drag; a band when snapped to one axis). */
+  .zoom-box {
+    position: absolute;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid var(--accent);
+    pointer-events: none;
+    z-index: 6;
   }
 
   /* ── Empty state (no data loaded) ── */

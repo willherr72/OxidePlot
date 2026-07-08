@@ -366,6 +366,13 @@ export class Renderer {
     (this.plot as any).set_x_range(xMin, xMax);
   }
 
+  /** Set the full view bounds (X and Y) — used by the rubber-band zoom box.
+   *  Bounds are in the same space `viewState()` reports (log space for log-Y). */
+  setViewBounds(xMin: number, xMax: number, yMin: number, yMax: number): void {
+    this.assertPlot();
+    (this.plot as any).set_view_bounds(xMin, xMax, yMin, yMax);
+  }
+
   /**
    * Compute a histogram for the series at `sourceIndex` with `nbins` bins.
    * Returns `{ counts, bin_centers, min, max, n }`.
