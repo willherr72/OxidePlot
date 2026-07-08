@@ -65,6 +65,21 @@ export interface HistogramData {
   n: number;
 }
 
+export interface SpectrumData {
+  freqs: number[];
+  power: number[];
+  sample_rate: number;
+}
+
+export interface SpectrogramData {
+  frames: number[][];
+  bins: number;
+  n_frames: number;
+  sample_rate: number;
+  nyquist: number;
+  duration_s: number;
+}
+
 /**
  * Wrapper around the WASM `OxidePlot` GPU renderer.
  *
@@ -351,6 +366,27 @@ export class Renderer {
   seriesHistogram(sourceIndex: number, nbins: number): HistogramData {
     this.assertPlot();
     return (this.plot as any).series_histogram(sourceIndex, nbins) as HistogramData;
+  }
+
+  /**
+   * Compute the power spectral density for the series at `sourceIndex`.
+   * `sampleRate` (Hz) is used if given; otherwise it is inferred from the
+   * series' xs. Returns `{ freqs, power, sample_rate }`.
+   */
+  seriesSpectrum(sourceIndex: number, sampleRate?: number): SpectrumData {
+    this.assertPlot();
+    return (this.plot as any).series_spectrum(sourceIndex, sampleRate ?? undefined) as SpectrumData;
+  }
+
+  /**
+   * Compute a short-time FFT magnitude spectrogram for the series at
+   * `sourceIndex` with the given `window` size. `sampleRate` (Hz) is used
+   * if given; otherwise it is inferred from the series' xs. Returns
+   * `{ frames, bins, n_frames, sample_rate, nyquist, duration_s }`.
+   */
+  seriesSpectrogram(sourceIndex: number, window: number, sampleRate?: number): SpectrogramData {
+    this.assertPlot();
+    return (this.plot as any).series_spectrogram(sourceIndex, window, sampleRate ?? undefined) as SpectrogramData;
   }
 
   // ── Table API ─────────────────────────────────────────────────────────────
