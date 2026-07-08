@@ -26,7 +26,7 @@
   //    pixel size via bind:clientWidth/clientHeight below — this renderer
   //    does not scale the backing store by devicePixelRatio, matching
   //    Graph.svelte's capture path). Margins reserve room for axis labels. ──
-  const MARGIN_LEFT = 52;
+  const MARGIN_LEFT = 70;
   const MARGIN_RIGHT = 10;
   const MARGIN_TOP = 14;
   const MARGIN_BOTTOM = 26;
@@ -144,11 +144,14 @@
     return v || fallback;
   }
 
-  /** Format a number to ~4 significant figures without exponential notation. */
+  /** Compact axis-label format: exponential for very small/large magnitudes
+   *  (keeps the label short so it fits the left margin), else ~3 sig figs. */
   function fmt(n: number): string {
     if (!isFinite(n)) return '—';
     if (n === 0) return '0';
-    return Number(n.toPrecision(4)).toString();
+    const a = Math.abs(n);
+    if (a < 1e-2 || a >= 1e5) return n.toExponential(1);
+    return Number(n.toPrecision(3)).toString();
   }
 
   /** Paint the background, the heatmap (if data is loaded), and baked axis

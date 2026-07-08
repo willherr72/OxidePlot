@@ -78,6 +78,20 @@ pub fn compute_spectrogram(vals: &[f64], window: usize) -> (Vec<Vec<f64>>, usize
         frames.push((0..bins).map(|k| buf[k].norm_sqr().sqrt()).collect());
         start += hop;
     }
+    // Include the trailing partial window (zero-padded past the last sample) so
+    // the spectrogram covers the full signal rather than dropping up to one
+    // window's worth of samples at the end.
+    if start < n {
+        let mut buf: Vec<Complex<f64>> = (0..w)
+            .map(|i| {
+                let s = start + i;
+                let v = if s < n { y[s] } else { 0.0 };
+                Complex::new(v * hann[i], 0.0)
+            })
+            .collect();
+        fft.process(&mut buf);
+        frames.push((0..bins).map(|k| buf[k].norm_sqr().sqrt()).collect());
+    }
     (frames, bins)
 }
 
@@ -98,6 +112,17 @@ mod spectral_tests {
         let (freqs, power) = compute_psd(&sig, fs);
         let peak = freqs[argmax(&power)];
         assert!((peak - 5.0).abs() < 0.5, "peak at {peak}, expected ~5 Hz");
+    }
+
+    #[test]
+    fn spectrogram_includes_trailing_window() {
+        // w=256, hop=128. n=434 → 2 full-window frames (start 0, 128), leaving a
+        // tail at start=256 (<434), so a zero-padded frame is appended → 3 total.
+        let sig: Vec<f64> = (0..434).map(|i| (i as f64 / 10.0).sin()).collect();
+        let (frames, bins) = compute_spectrogram(&sig, 256);
+        assert_eq!(bins, 128);
+        assert_eq!(frames.len(), 3, "trailing partial window must be included");
+        assert!(frames.iter().all(|f| f.len() == 128));
     }
 
     #[test]
