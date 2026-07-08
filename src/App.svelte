@@ -39,7 +39,7 @@
   let viewState: ViewState | null = null;
   let hasData = false;
   let drawMode: 'lines' | 'step' | 'points' = 'lines';
-  let viewMode: 'plot' | 'table' | 'dist' = 'plot';
+  let viewMode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' = 'plot';
   let cursorMode = false;
   // Appearance (mirrors of the focused graph's settings; seeded with the
   // graph's defaults so the Settings panel shows correct initial values).

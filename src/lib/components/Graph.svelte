@@ -22,6 +22,8 @@
   import type { FileMeta, SeriesSpec, AxisTicksData, ViewState, SeriesInfoEntry } from '../renderer.js';
   import TableView from './TableView.svelte';
   import DistView from './DistView.svelte';
+  import SpectrumView from './SpectrumView.svelte';
+  import SpectrogramView from './SpectrogramView.svelte';
   import Axes from '../overlay/Axes.svelte';
   import Cursors from '../overlay/Cursors.svelte';
   import type { CursorPoint } from '../overlay/Cursors.svelte';
@@ -66,15 +68,20 @@
   let yScale = 'linear';
   let downsampleMode = 'minmax';
 
-  // ── View mode (plot / table / dist) ─────────────────────────────────────────
-  let viewMode: 'plot' | 'table' | 'dist' = 'plot';
+  // ── View mode (plot / table / dist / spectrum / spectrogram) ────────────────
+  let viewMode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' = 'plot';
   let tableView: TableView;
   let distView: DistView;
+  let spectrumView: SpectrumView;
+  let spectrogramView: SpectrogramView;
 
   // ── Selected series (SeriesList row selection; Dist now shows all series as
-  //    small multiples and no longer depends on this — kept for a future
-  //    single-series view, e.g. Spectrogram) ────────────────────────────────
+  //    small multiples and no longer depends on this — used by the
+  //    single-series Spectrogram view) ─────────────────────────────────────
   let selectedSeriesIndex = 0;
+
+  // ── Sample rate override for spectral views (null = infer from X) ───────────
+  let sampleRate: number | null = null;
 
   // ── Draw mode ────────────────────────────────────────────────────────────────
   type DrawMode = 'lines' | 'step' | 'points';
@@ -313,6 +320,10 @@
       tick().then(() => { if (tableView) tableView.refresh(); });
     } else if (viewMode === 'dist') {
       tick().then(() => { if (distView) distView.refresh(); });
+    } else if (viewMode === 'spectrum') {
+      tick().then(() => { if (spectrumView) spectrumView.refresh(); });
+    } else if (viewMode === 'spectrogram') {
+      tick().then(() => { if (spectrogramView) spectrogramView.refresh(); });
     }
     dispatch('datachanged');
   }
@@ -348,14 +359,18 @@
     if (!cursorMode) cursors = [];
   }
 
-  /** Switch to `mode` (plot/table/dist); mounts + refreshes the target view on switch. */
-  export async function setViewMode(mode: 'plot' | 'table' | 'dist'): Promise<void> {
+  /** Switch to `mode` (plot/table/dist/spectrum/spectrogram); mounts + refreshes the target view on switch. */
+  export async function setViewMode(mode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram'): Promise<void> {
     viewMode = mode;
     await tick();
     if (mode === 'table') {
       tableView?.refresh();
     } else if (mode === 'dist') {
       distView?.refresh();
+    } else if (mode === 'spectrum') {
+      spectrumView?.refresh();
+    } else if (mode === 'spectrogram') {
+      spectrogramView?.refresh();
     }
     dispatch('viewmode');
   }
@@ -638,7 +653,7 @@
   export function getSeriesInfo(): SeriesInfoEntry[] { return seriesInfo; }
   export function getViewState(): ViewState | null { return viewState; }
   export function getDrawMode(): DrawMode { return drawMode; }
-  export function getViewMode(): 'plot' | 'table' | 'dist' { return viewMode; }
+  export function getViewMode(): 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' { return viewMode; }
   export function getShowGrid(): boolean { return showGrid; }
   export function getCursorMode(): boolean { return cursorMode; }
   export function getHasData(): boolean { return hasData; }
@@ -652,6 +667,20 @@
   export function setSelectedSeriesIndex(i: number): void {
     selectedSeriesIndex = i;
     if (viewMode === 'dist') distView?.refresh();
+    if (viewMode === 'spectrogram') spectrogramView?.refresh();
+  }
+
+  // ── Sample-rate override input (Spectrum/Spectrogram header field) ──────────
+  /** Handle input/change on the sample-rate field: empty → null (infer),
+   *  otherwise the parsed number; then refresh whichever spectral view is active. */
+  function onSampleRateInput(e: Event): void {
+    const raw = (e.target as HTMLInputElement).value;
+    sampleRate = raw === '' ? null : Number(raw);
+    if (viewMode === 'spectrum') {
+      spectrumView?.refresh();
+    } else if (viewMode === 'spectrogram') {
+      spectrogramView?.refresh();
+    }
   }
 </script>
 
@@ -676,14 +705,41 @@
       on:click={() => setViewMode('dist')}
       title="Distribution view"
     >Dist</button>
+    <button
+      class="view-tab"
+      class:active={viewMode === 'spectrum'}
+      on:click={() => setViewMode('spectrum')}
+      title="Spectrum view"
+    >Spectrum</button>
+    <button
+      class="view-tab"
+      class:active={viewMode === 'spectrogram'}
+      on:click={() => setViewMode('spectrogram')}
+      title="Spectrogram view"
+    >Spectrogram</button>
+    {#if viewMode === 'spectrum' || viewMode === 'spectrogram'}
+      <input
+        class="sample-rate-input"
+        type="number"
+        placeholder="auto (from X)"
+        value={sampleRate ?? ''}
+        on:input={onSampleRateInput}
+        on:change={onSampleRateInput}
+        title="Sample rate override (Hz) — empty infers from X"
+      />
+    {/if}
   </div>
 {/if}
 
-<!-- Table / Dist view — rendered alongside (not replacing) the canvas -->
+<!-- Table / Dist / Spectrum / Spectrogram view — rendered alongside (not replacing) the canvas -->
 {#if hasData && viewMode === 'table'}
   <TableView bind:this={tableView} {renderer} />
 {:else if hasData && viewMode === 'dist'}
   <DistView bind:this={distView} {renderer} />
+{:else if hasData && viewMode === 'spectrum'}
+  <SpectrumView bind:this={spectrumView} {renderer} {sampleRate} />
+{:else if hasData && viewMode === 'spectrogram'}
+  <SpectrogramView bind:this={spectrogramView} {renderer} seriesIndex={selectedSeriesIndex} {sampleRate} />
 {/if}
 
 <!-- Plot canvas + axis overlay — fills the remaining space; hidden (not unmounted) outside plot mode -->
@@ -766,6 +822,24 @@
   .view-tab.active {
     background: var(--btn-active-bg);
     color: var(--accent);
+    border-color: var(--btn-active-border);
+  }
+
+  /* Sample-rate override field (Spectrum/Spectrogram header). */
+  .sample-rate-input {
+    width: 96px;
+    margin-left: 4px;
+    padding: 3px 6px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+  }
+
+  .sample-rate-input:focus {
+    outline: none;
     border-color: var(--btn-active-border);
   }
 
