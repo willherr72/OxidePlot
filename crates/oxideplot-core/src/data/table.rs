@@ -97,13 +97,30 @@ pub fn compute_view_index(data: &LoadedData, q: &TableQuery) -> Vec<usize> {
 }
 
 /// Extract `count` rows starting at `start` (clamped) from `view_index`, each row
-/// = all columns' cells as owned strings.
-pub fn window_rows(data: &LoadedData, view_index: &[usize], start: usize, count: usize) -> Vec<Vec<String>> {
+/// = the requested columns' cells as owned strings, in the order given.
+///
+/// `visible_cols`: `Some(cols)` projects each row onto exactly those column
+/// indices (in that order) — used to show only the plotted columns. `None`
+/// keeps the historical behavior of returning every column in file order.
+pub fn window_rows(
+    data: &LoadedData,
+    view_index: &[usize],
+    start: usize,
+    count: usize,
+    visible_cols: Option<&[usize]>,
+) -> Vec<Vec<String>> {
     let end = start.saturating_add(count).min(view_index.len());
-    let cols = data.column_data.len();
+    let all_cols: Vec<usize>;
+    let cols: &[usize] = match visible_cols {
+        Some(c) => c,
+        None => {
+            all_cols = (0..data.column_data.len()).collect();
+            &all_cols
+        }
+    };
     view_index[start.min(view_index.len())..end]
         .iter()
-        .map(|&r| (0..cols).map(|c| cell(data, c, r).to_string()).collect())
+        .map(|&r| cols.iter().map(|&c| cell(data, c, r).to_string()).collect())
         .collect()
 }
 
@@ -168,7 +185,7 @@ mod tests {
     #[test]
     fn window_rows_slices_in_view_order() {
         let d = fixture();
-        let rows = window_rows(&d, &[2, 0, 1], 0, 2);
+        let rows = window_rows(&d, &[2, 0, 1], 0, 2, None);
         assert_eq!(rows, vec![
             vec!["1".to_string(), "carol".to_string()],
             vec!["2".to_string(), "bob".to_string()],
@@ -177,7 +194,25 @@ mod tests {
     #[test]
     fn window_rows_clamps_out_of_bounds() {
         let d = fixture();
-        let rows = window_rows(&d, &[0, 1, 2], 2, 10);
+        let rows = window_rows(&d, &[0, 1, 2], 2, 10, None);
         assert_eq!(rows.len(), 1); // only row at index 2 remains
+    }
+    #[test]
+    fn window_rows_projects_visible_cols_in_requested_order() {
+        let d = fixture();
+        // Only column 1 ("name"), reversed order irrelevant here (single col).
+        let rows = window_rows(&d, &[2, 0, 1], 0, 3, Some(&[1]));
+        assert_eq!(rows, vec![
+            vec!["carol".to_string()],
+            vec!["bob".to_string()],
+            vec!["alice".to_string()],
+        ]);
+    }
+    #[test]
+    fn window_rows_visible_cols_can_reorder_columns() {
+        let d = fixture();
+        // Request column 1 before column 0 — output should follow that order.
+        let rows = window_rows(&d, &[0], 0, 1, Some(&[1, 0]));
+        assert_eq!(rows, vec![vec!["bob".to_string(), "2".to_string()]]);
     }
 }

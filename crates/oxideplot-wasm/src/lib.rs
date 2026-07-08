@@ -28,6 +28,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 mod wasm_impl {
     use super::*;
+    use std::collections::BTreeSet;
     use serde::{Deserialize, Serialize};
     use oxideplot_core::render::gpu_types::{DrawMode, GridGpuData, PlotUniforms, SeriesGpuData};
     use oxideplot_core::render::renderer::PlotRenderer;
@@ -263,6 +264,13 @@ mod wasm_impl {
         table_query: TableQuery,
         /// Filtered + sorted row indices for the current table_query.
         table_index: Vec<usize>,
+        /// Original file-column indices to show in the Table view, in file
+        /// order: the union of each plotted source's `x_name` and `name`,
+        /// resolved to column indices and deduped. Empty = fallback to
+        /// showing every file column (no series plotted, or none of the
+        /// plotted names matched a file column). Recomputed by
+        /// `recompute_plotted_cols` whenever `sources` changes.
+        plotted_cols: Vec<usize>,
     }
 
     #[wasm_bindgen]
@@ -324,6 +332,7 @@ mod wasm_impl {
                 downsample_mode: DownsampleMode::MinMax,
                 table_query: TableQuery::default(),
                 table_index: vec![],
+                plotted_cols: vec![],
             }
         }
 
@@ -353,6 +362,8 @@ mod wasm_impl {
             // Clear any previous series until the user picks new columns.
             self.sources.clear();
             self.series.clear();
+            // No series plotted yet — Table view falls back to all columns.
+            self.plotted_cols.clear();
 
             // Initialise numeric_cols: a column is numeric if it parses as f64
             // (≥ 50% success rate) OR if it parses as timestamps.
@@ -465,6 +476,8 @@ mod wasm_impl {
 
             self.sources = new_sources;
             self.x_is_time = x_is_time_any;
+            // Table view should now show only the columns backing these series.
+            self.recompute_plotted_cols();
             // auto_fit computes bounds from source data, calls rebuild_visible + render.
             self.auto_fit();
             Ok(())
@@ -793,6 +806,7 @@ mod wasm_impl {
                 return;
             }
             self.sources.remove(index);
+            self.recompute_plotted_cols();
             self.rebuild_visible();
             self.render();
         }
@@ -801,6 +815,7 @@ mod wasm_impl {
         #[wasm_bindgen]
         pub fn clear_series(&mut self) {
             self.sources.clear();
+            self.recompute_plotted_cols();
             self.rebuild_visible();
             self.render();
         }
@@ -991,16 +1006,22 @@ mod wasm_impl {
         // ── Table API ─────────────────────────────────────────────────────────
 
         /// Return column metadata as `[{ name: string, numeric: boolean }]`.
+        ///
+        /// Restricted to the plotted columns (`self.plotted_cols`) when any
+        /// series are plotted and at least one of their column names matched
+        /// the file; otherwise every file column is returned. Indices here
+        /// are "display indices" — positions in this returned array — which
+        /// `table_set_sort` / `table_set_column_filter` / `table_window`
+        /// accept and internally translate back to real file-column indices.
         #[wasm_bindgen]
         pub fn table_columns(&self) -> Result<JsValue, JsValue> {
             let cols: Vec<TableColumnInfo> = match &self.loaded {
                 None => vec![],
-                Some(d) => d
-                    .columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| TableColumnInfo {
-                        name: name.clone(),
+                Some(d) => self
+                    .display_indices(d)
+                    .into_iter()
+                    .map(|i| TableColumnInfo {
+                        name: d.columns[i].clone(),
                         numeric: self.table_query.numeric_cols.get(i).copied().unwrap_or(false),
                     })
                     .collect(),
@@ -1008,10 +1029,13 @@ mod wasm_impl {
             serde_wasm_bindgen::to_value(&cols).map_err(|e| JsValue::from_str(&e.to_string()))
         }
 
-        /// Set sort: column index + direction; rebuilds the view index.
+        /// Set sort: DISPLAY column index (position in `table_columns()`'s
+        /// output) + direction; rebuilds the view index. Translated to the
+        /// real file-column index before being stored.
         #[wasm_bindgen]
         pub fn table_set_sort(&mut self, col: usize, ascending: bool) {
-            self.table_query.sort = Some((col, ascending));
+            let orig = self.to_orig_col(col);
+            self.table_query.sort = Some((orig, ascending));
             self.rebuild_table_index();
         }
 
@@ -1029,7 +1053,9 @@ mod wasm_impl {
             self.rebuild_table_index();
         }
 
-        /// Set or clear a per-column filter.
+        /// Set or clear a per-column filter. `col` is a DISPLAY column index
+        /// (see `table_columns`), translated to the real file-column index
+        /// before being stored.
         ///
         /// `spec` is a JS value of shape:
         /// - `null` / `undefined` → remove the filter for `col`
@@ -1037,18 +1063,19 @@ mod wasm_impl {
         /// - `{ min?: number, max?: number }` → `ColFilter::Range`
         #[wasm_bindgen]
         pub fn table_set_column_filter(&mut self, col: usize, spec: JsValue) -> Result<(), JsValue> {
+            let orig = self.to_orig_col(col);
             if spec.is_null() || spec.is_undefined() {
-                self.table_query.col_filters.remove(&col);
+                self.table_query.col_filters.remove(&orig);
             } else {
                 let fs: FilterSpec = serde_wasm_bindgen::from_value(spec)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
                 if let Some(text) = fs.text {
-                    self.table_query.col_filters.insert(col, ColFilter::Text(text));
+                    self.table_query.col_filters.insert(orig, ColFilter::Text(text));
                 } else if fs.min.is_some() || fs.max.is_some() {
-                    self.table_query.col_filters.insert(col, ColFilter::Range { min: fs.min, max: fs.max });
+                    self.table_query.col_filters.insert(orig, ColFilter::Range { min: fs.min, max: fs.max });
                 } else {
                     // All None → clear the filter.
-                    self.table_query.col_filters.remove(&col);
+                    self.table_query.col_filters.remove(&orig);
                 }
             }
             self.rebuild_table_index();
@@ -1062,13 +1089,18 @@ mod wasm_impl {
         }
 
         /// Return a window of rows `[start, start+count)` from the current view
-        /// as `string[][]` — each inner array is one row, each string is one cell.
+        /// as `string[][]` — each inner array is one row, each string is one
+        /// cell, projected onto the same (plotted-columns-only, or all-columns
+        /// fallback) column set and order as `table_columns()`.
         #[wasm_bindgen]
         pub fn table_window(&self, start: usize, count: usize) -> Result<JsValue, JsValue> {
             let rows = self
                 .loaded
                 .as_ref()
-                .map(|d| window_rows(d, &self.table_index, start, count))
+                .map(|d| {
+                    let cols = self.display_indices(d);
+                    window_rows(d, &self.table_index, start, count, Some(&cols))
+                })
                 .unwrap_or_default();
             serde_wasm_bindgen::to_value(&rows).map_err(|e| JsValue::from_str(&e.to_string()))
         }
@@ -1159,6 +1191,11 @@ mod wasm_impl {
                 y_max,
             });
 
+            // Transform output rarely matches a file column name, so it's
+            // typically omitted from the Table view (acceptable per spec) —
+            // but the source's x column should still count if it's the
+            // first plotted series to reference it.
+            self.recompute_plotted_cols();
             // auto_fit calls rebuild_visible + render — new series is immediately visible.
             self.auto_fit();
             Ok(())
@@ -1283,6 +1320,64 @@ mod wasm_impl {
         fn rebuild_table_index(&mut self) {
             if let Some(d) = &self.loaded {
                 self.table_index = compute_view_index(d, &self.table_query);
+            }
+        }
+
+        /// Recompute `plotted_cols` — the union of each plotted source's
+        /// `x_name` and `name`, resolved to file-column indices, deduped, in
+        /// file-column order — from the current `sources` + `loaded` file.
+        ///
+        /// Sources whose name doesn't match any file column (e.g. a
+        /// transform's derived series) are simply not represented; if none
+        /// of the plotted names match, `plotted_cols` ends up empty, which
+        /// `display_indices` / `to_orig_col` treat as "show every column".
+        ///
+        /// Unconditionally drops any active sort/column-filter and rebuilds the
+        /// row index: those are stored by real file-column index but are SET
+        /// via a DISPLAY index (see `to_orig_col`), and the display↔real
+        /// mapping can shift shape whenever `sources` changes — silently
+        /// repointing a stale sort/filter at the wrong column (or one that's
+        /// no longer shown). Called on every `sources` mutation, so the JS
+        /// side can simply reset its own sort/filter UI state unconditionally
+        /// on every `refresh()` and stay in sync (see `TableView.loadMeta`).
+        fn recompute_plotted_cols(&mut self) {
+            self.plotted_cols = match &self.loaded {
+                None => vec![],
+                Some(d) => {
+                    let mut set: BTreeSet<usize> = BTreeSet::new();
+                    for src in &self.sources {
+                        if let Some(i) = d.columns.iter().position(|c| c == &src.x_name) {
+                            set.insert(i);
+                        }
+                        if let Some(i) = d.columns.iter().position(|c| c == &src.name) {
+                            set.insert(i);
+                        }
+                    }
+                    set.into_iter().collect()
+                }
+            };
+            self.table_query.sort = None;
+            self.table_query.col_filters.clear();
+            self.rebuild_table_index();
+        }
+
+        /// Column indices to display in the table, in display order:
+        /// `plotted_cols` when non-empty, else every file column.
+        fn display_indices(&self, d: &LoadedData) -> Vec<usize> {
+            if self.plotted_cols.is_empty() {
+                (0..d.columns.len()).collect()
+            } else {
+                self.plotted_cols.clone()
+            }
+        }
+
+        /// Translate a DISPLAY column index (position in `table_columns()`'s
+        /// output) to the real file-column index, for sort/filter targeting.
+        fn to_orig_col(&self, display_col: usize) -> usize {
+            if self.plotted_cols.is_empty() {
+                display_col
+            } else {
+                self.plotted_cols.get(display_col).copied().unwrap_or(display_col)
             }
         }
 

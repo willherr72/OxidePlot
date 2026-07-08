@@ -48,6 +48,13 @@
     for (let i = 0; i < filterTimers.length; i++) {
       if (filterTimers[i] !== null) { clearTimeout(filterTimers[i]!); filterTimers[i] = null; }
     }
+    // The renderer shows only the plotted columns, and that set can change
+    // shape/order across refreshes (e.g. after re-picking series). Column
+    // indices shift meaning when that happens, so — mirroring the wasm side,
+    // which drops its sort/filter state on every series mutation — reset the
+    // sort UI here too rather than risk a caret pointing at the wrong column.
+    sortCol = null;
+    sortDir = null;
     try {
       columns = renderer.tableColumns();
       rowCount = renderer.tableRowCount();

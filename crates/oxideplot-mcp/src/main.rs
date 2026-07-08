@@ -1250,7 +1250,7 @@ impl OxidePlot {
         let total = idx.len();
         let start = offset.unwrap_or(0);
         let count = limit.unwrap_or(20).min(200);
-        let rows = window_rows(&ds.data, &idx, start, count);
+        let rows = window_rows(&ds.data, &idx, start, count, None);
 
         Ok(Self::text_result(json!({
             "total": total,
