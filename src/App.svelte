@@ -21,6 +21,12 @@
   let focusedId = 0;
   let nextId = 1;
 
+  // Measured height of the graph stack; when the graphs (each ≥260px) can't all
+  // fit, the stack overflows and plain-wheel scrolls it (Ctrl/Cmd+wheel zooms).
+  let stackHeight = 0;
+  const MIN_GRAPH_H = 260;
+  $: canScrollStack = graphs.length * MIN_GRAPH_H > stackHeight;
+
   /** Component instances keyed by graph id, populated via `bind:this`. */
   let graphRefs: Record<number, Graph> = {};
 
@@ -584,13 +590,14 @@
        context over the plot area. Each graph is keyed by id (stable across
        removals) and flexes to equal height. -->
   <div class="workspace">
-    <div class="graph-stack">
+    <div class="graph-stack" bind:clientHeight={stackHeight}>
       {#each graphs as g (g.id)}
         <!-- svelte-ignore a11y-no-static-element-interactions -->
         <div class="graph-slot">
           <Graph
             bind:this={graphRefs[g.id]}
             focused={g.id === focusedId}
+            {canScrollStack}
             on:ready={() => handleGraphReady(g.id)}
             on:focusrequest={() => setFocus(g.id)}
             on:xrange={(e) => handleXRange(g.id, e.detail)}

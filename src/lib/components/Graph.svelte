@@ -29,6 +29,9 @@
   // ── Public props ────────────────────────────────────────────────────────────
   /** Draw a focus border when true. */
   export let focused = false;
+  /** True when the graph stack overflows and can scroll — plain wheel then
+   *  scrolls the stack instead of zooming (Ctrl/Cmd+wheel still zooms). */
+  export let canScrollStack = false;
 
   // ── Public renderer accessor ─────────────────────────────────────────────────
   /** This graph's renderer — App reaches it via `bind:this={graphRef}` then `graphRef.renderer.*`. */
@@ -198,6 +201,13 @@
   }
 
   function onWheel(e: WheelEvent) {
+    // Plain wheel scrolls the graph stack when it overflows (`canScrollStack`);
+    // Ctrl/Cmd + wheel ALWAYS zooms the plot. When the stack fits (nothing to
+    // scroll), plain wheel zooms too — so a single graph needs no modifier.
+    const zoomIntent = e.ctrlKey || e.metaKey;
+    if (!zoomIntent && canScrollStack) {
+      return; // don't preventDefault — let the event bubble so the stack scrolls
+    }
     e.preventDefault();
     const { sx, sy } = pixelScale();
     const rect = canvas.getBoundingClientRect();
