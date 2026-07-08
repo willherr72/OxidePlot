@@ -41,6 +41,9 @@
   let drawMode: 'lines' | 'step' | 'points' = 'lines';
   let viewMode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' = 'plot';
   let cursorMode = false;
+  /** Basename of the focused graph's file (per-graph — each graph can hold a
+   *  different file), mirrored from the focused graph for the toolbar label. */
+  let focusedFileName = '';
   // Appearance (mirrors of the focused graph's settings; seeded with the
   // graph's defaults so the Settings panel shows correct initial values).
   let showGrid = true;
@@ -75,6 +78,7 @@
     yScale = g.getYScale();
     downsampleMode = g.getDownsampleMode();
     selectedSeriesIndex = g.getSelectedSeriesIndex();
+    focusedFileName = g.getFileName();
     const err = g.getError();
     if (err) error = err;
   }
@@ -581,8 +585,8 @@
       </button>
     </div>
 
-    {#if filePath && !fileMeta}
-      <span class="file-label" title={filePath}>{filePath.split(/[\\/]/).pop()}</span>
+    {#if focusedFileName && !fileMeta}
+      <span class="file-label" title={focusedFileName}>{focusedFileName}</span>
     {/if}
     {#if error}
       <span class="error-msg" title={error}>{error}</span>

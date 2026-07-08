@@ -56,6 +56,9 @@
   let seriesInfo: SeriesInfoEntry[] = [];
   let hasData = false;
   let dragHover = false;
+  /** Basename of the file loaded into this graph (per-graph, shown by App when
+   *  focused — the workspace can hold a different file per graph). */
+  let fileName = '';
   /** Most recent renderer init/load error (App reads via getError()), or null. */
   let initError: string | null = null;
 
@@ -267,17 +270,31 @@
     });
     ro.observe(canvas);
 
-    // Register Tauri drag-drop listener (OS drops give file paths; HTML5 ondrop does not).
-    // A file dropped on this graph loads into THIS graph.
+    // Register Tauri drag-drop listener (OS drops give file paths; HTML5 ondrop
+    // does not). onDragDropEvent is WEBVIEW-GLOBAL — it fires for EVERY graph on
+    // any drop — so we must check the event position against THIS graph's bounds
+    // and only react when the cursor is actually over it. Position is physical
+    // pixels (window-relative); convert to CSS px via devicePixelRatio to compare
+    // with getBoundingClientRect.
+    const hitsThisGraph = (pos: { x: number; y: number } | undefined): boolean => {
+      if (!pos || !canvas) return false;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const x = pos.x / dpr;
+      const y = pos.y / dpr;
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    };
     const unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
-      const p = event.payload;
+      const p = event.payload as { type: string; paths?: string[]; position?: { x: number; y: number } };
       if (p.type === 'over') {
-        dragHover = true;
+        // Highlight only the graph under the cursor.
+        dragHover = hitsThisGraph(p.position);
       } else if (p.type === 'leave') {
         dragHover = false;
       } else if (p.type === 'drop') {
         dragHover = false;
-        const path = (p as { type: string; paths?: string[] }).paths?.[0];
+        if (!hitsThisGraph(p.position)) return; // dropped on a different graph
+        const path = p.paths?.[0];
         if (path) {
           // App owns the open flow (recent files, prefs, ColumnDialog); a file
           // dropped on this graph focuses it and asks App to load into it.
@@ -310,8 +327,12 @@
   export function loadBytes(bytes: Uint8Array, filename: string): FileMeta {
     initError = null;
     const meta = renderer.loadFileBytes(bytes, filename);
+    fileName = filename; // remember which file this graph holds (per-graph label)
     return meta;
   }
+
+  /** Basename of the file loaded into this graph (App shows the focused graph's). */
+  export function getFileName(): string { return fileName; }
 
   /**
    * Build GPU series from `specs`, reset draw mode to default, refresh state,
