@@ -129,6 +129,10 @@
   let filePath: string | null = null;
   let error: string | null = null;
   let loading = false;
+  /** Graph id the currently-open column dialog belongs to. A drop (or open) can
+   *  target a graph that isn't the reactive `focusedGraph` yet, so the confirm
+   *  must call setSeries on THIS graph — the one whose bytes were just loaded. */
+  let dialogGraphId: number | null = null;
 
   // ── Workspace-level byte cache (shared dataset) ───────────────────────────────
   // Bytes are read from disk once on open and cached here. A newly-added (empty)
@@ -332,8 +336,11 @@
 
   /** Load a file at a known path (shared by dialog-pick, recent-click, drag-drop). */
   async function openPath(path: string) {
-    const g = focusedGraph;
-    if (!g) return;
+    // Read the graph directly (not the reactive `focusedGraph` alias, which is
+    // stale in the same tick as a preceding setFocus — e.g. on drag-drop).
+    const targetId = focusedId;
+    const g = graphRefs[targetId];
+    if (!g) { loading = false; return; }
     loading = true;
     error = null;
     try {
@@ -342,6 +349,7 @@
       const bytes = new Uint8Array(numArr);
       const filename = path.split(/[\\/]/).pop() ?? path;
       fileMeta = g.loadBytes(bytes, filename);
+      dialogGraphId = targetId; // the confirm must setSeries on THIS graph
       // Cache the bytes at workspace level (only after a successful parse) so
       // other (empty) graphs can reuse them without re-reading from disk.
       loadedBytes = bytes;
@@ -362,10 +370,11 @@
     loading = true;
     try {
       const path = await pickFile();
-      if (!path) { loading = false; return; }
+      if (!path) return;
       await openPath(path);
     } catch (e) {
       error = `Failed to open file: ${e}`;
+    } finally {
       loading = false;
     }
   }
@@ -379,11 +388,16 @@
     const specs = event.detail;
     fileMeta = null; // close dialog
     error = null;
-    const g = focusedGraph;
+    // Target the graph whose bytes were loaded for this dialog (may not be the
+    // reactive focusedGraph on a drag-drop), reading graphRefs directly.
+    const targetId = dialogGraphId ?? focusedId;
+    const g = graphRefs[targetId];
+    dialogGraphId = null;
     if (!g) return;
     try {
       g.setSeries(specs);
-      syncFromGraph();
+      if (targetId !== focusedId) setFocus(targetId); // focus + sync the plotted graph
+      else syncFromGraph();
     } catch (e) {
       error = `Failed to render series: ${e}`;
     }
@@ -397,11 +411,13 @@
    *  their own columns from the same dataset — identical flow to a fresh open,
    *  no disk read. Only callable when `canUseLoadedData` is true. */
   function handleUseLoadedData() {
-    const g = focusedGraph;
+    const targetId = focusedId;
+    const g = graphRefs[targetId];
     if (!g || !loadedBytes) return;
     error = null;
     try {
       fileMeta = g.loadBytes(loadedBytes, loadedName);
+      dialogGraphId = targetId; // the confirm must setSeries on THIS graph
     } catch (e) {
       error = `Failed to load cached data: ${e}`;
     }
