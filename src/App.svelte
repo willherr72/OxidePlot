@@ -724,7 +724,7 @@
         />
       {/if}
       {#if hasData}
-        <div class="formula-panel">
+        <div class="formula-panel" class:beside-settings={viewMode === 'plot' && showSettings}>
           <button
             class="formula-toggle"
             class:active={showFormulaEditor}
@@ -1212,13 +1212,19 @@
      regardless of their content height. */
   .formula-panel {
     position: absolute;
-    bottom: 8px;
-    right: 8px;
+    /* Top-left so it never covers the X-axis labels at the bottom of the plot.
+       Settings also lives top-left (plot mode only); shift right of it then. */
+    top: 8px;
+    left: 8px;
     z-index: 20;
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
+    align-items: flex-start;
     gap: 6px;
+  }
+
+  .formula-panel.beside-settings {
+    left: 236px; /* clear the Settings panel (min-width 220 + 8px margin) */
   }
 
   .formula-toggle {
