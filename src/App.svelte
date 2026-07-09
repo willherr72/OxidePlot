@@ -39,7 +39,7 @@
   let viewState: ViewState | null = null;
   let hasData = false;
   let drawMode: 'lines' | 'step' | 'points' = 'lines';
-  let viewMode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' = 'plot';
+  let viewMode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' | 'scatter' = 'plot';
   let cursorMode = false;
   /** Basename of the focused graph's file (per-graph — each graph can hold a
    *  different file), mirrored from the focused graph for the toolbar label. */

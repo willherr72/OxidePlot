@@ -122,6 +122,15 @@ mod wasm_impl {
         duration_s: f64,
     }
 
+    /// Return payload for `scatter_data`: two loaded-dataset columns read as
+    /// f64, zipped and filtered to finite pairs, preserving row order.
+    #[derive(serde::Serialize)]
+    struct ScatterData {
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+        n: usize,
+    }
+
     /// The colour palette used by `ColumnDialog` on the JS side.
     /// `add_transform` picks from this palette by series count so derived
     /// series blend visually with the source series.
@@ -1443,6 +1452,53 @@ mod wasm_impl {
         #[wasm_bindgen]
         pub fn column_names(&self) -> Vec<String> {
             self.loaded.as_ref().map(|d| d.columns.clone()).unwrap_or_default()
+        }
+
+        /// Return `{ xs, ys, n }` for the Scatter (XY) view: dataset columns
+        /// `x_col` and `y_col` read as f64 (X tries datetime first, like
+        /// `set_series`), zipped, and filtered to finite pairs in row order.
+        ///
+        /// Throws (JS exception) if no file is loaded, either column index is
+        /// out of range, or there are no finite pairs.
+        #[wasm_bindgen]
+        pub fn scatter_data(&self, x_col: usize, y_col: usize) -> Result<JsValue, JsValue> {
+            let data = self
+                .loaded
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("No file loaded."))?;
+
+            let num_cols = data.column_data.len();
+            if x_col >= num_cols || y_col >= num_cols {
+                return Err(JsValue::from_str(&format!(
+                    "Column index out of range: x_col={x_col}, y_col={y_col}, num_cols={num_cols}"
+                )));
+            }
+
+            let x_col_data = &data.column_data[x_col];
+            let y_col_data = &data.column_data[y_col];
+
+            // Convert X: try datetime first, fall back to f64 (mirrors set_series).
+            let x_vals: Vec<f64> = if let Some((ts, _)) = column_to_timestamps(x_col_data) {
+                ts
+            } else {
+                column_to_f64(x_col_data).0
+            };
+            let (y_vals, _) = column_to_f64(y_col_data);
+
+            let (xs, ys): (Vec<f64>, Vec<f64>) = x_vals
+                .iter()
+                .zip(y_vals.iter())
+                .filter(|(&x, &y)| x.is_finite() && y.is_finite())
+                .map(|(&x, &y)| (x, y))
+                .unzip();
+
+            if xs.is_empty() {
+                return Err(JsValue::from_str("No finite (x, y) pairs for these columns"));
+            }
+
+            let n = xs.len();
+            serde_wasm_bindgen::to_value(&ScatterData { xs, ys, n })
+                .map_err(|e| JsValue::from_str(&e.to_string()))
         }
 
         // ── X-range sync (Task 4) ─────────────────────────────────────────────

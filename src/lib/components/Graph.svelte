@@ -24,6 +24,7 @@
   import DistView from './DistView.svelte';
   import SpectrumView from './SpectrumView.svelte';
   import SpectrogramView from './SpectrogramView.svelte';
+  import ScatterView from './ScatterView.svelte';
   import Axes from '../overlay/Axes.svelte';
   import Cursors from '../overlay/Cursors.svelte';
   import type { CursorPoint } from '../overlay/Cursors.svelte';
@@ -71,12 +72,20 @@
   let yScale = 'linear';
   let downsampleMode = 'minmax';
 
-  // ── View mode (plot / table / dist / spectrum / spectrogram) ────────────────
-  let viewMode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' = 'plot';
+  // ── View mode (plot / table / dist / spectrum / spectrogram / scatter) ──────
+  let viewMode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' | 'scatter' = 'plot';
   let tableView: TableView;
   let distView: DistView;
   let spectrumView: SpectrumView;
   let spectrogramView: SpectrogramView;
+  let scatterView: ScatterView;
+
+  // ── Scatter (XY) view column selection — X/Y dataset column indices, and
+  //    the dataset's column names for the header dropdowns. Reset on new
+  //    data (setSeries) so a fresh file starts at cols 0/1. ───────────────
+  let scatterX = 0;
+  let scatterY = 1;
+  let columnNames: string[] = [];
 
   // ── Selected series (SeriesList row selection; Dist now shows all series as
   //    small multiples and no longer depends on this — used by the
@@ -424,6 +433,9 @@
     selectedSeriesIndex = 0; // fresh data — select the first series
     refreshView();
     refreshSeriesInfo();
+    refreshColumnNames();
+    scatterX = 0; // fresh data — default the Scatter view to cols 0/1
+    scatterY = columnNames.length > 1 ? 1 : 0;
     if (viewMode === 'table') {
       tick().then(() => { if (tableView) tableView.refresh(); });
     } else if (viewMode === 'dist') {
@@ -432,8 +444,16 @@
       tick().then(() => { if (spectrumView) spectrumView.refresh(); });
     } else if (viewMode === 'spectrogram') {
       tick().then(() => { if (spectrogramView) spectrogramView.refresh(); });
+    } else if (viewMode === 'scatter') {
+      tick().then(() => { if (scatterView) scatterView.refresh(); });
     }
     dispatch('datachanged');
+  }
+
+  /** Re-pull the loaded dataset's column names for the Scatter view's X/Y
+   *  header dropdowns. No-op (empty list) if no file is loaded. */
+  function refreshColumnNames(): void {
+    columnNames = getColumnNames();
   }
 
   /**
@@ -446,6 +466,7 @@
     renderer.deriveColumn(name, expr);
     refreshView();
     refreshSeriesInfo();
+    refreshColumnNames();
     if (viewMode === 'table') {
       tick().then(() => { if (tableView) tableView.refresh(); });
     } else if (viewMode === 'dist') {
@@ -454,6 +475,8 @@
       tick().then(() => { if (spectrumView) spectrumView.refresh(); });
     } else if (viewMode === 'spectrogram') {
       tick().then(() => { if (spectrogramView) spectrogramView.refresh(); });
+    } else if (viewMode === 'scatter') {
+      tick().then(() => { if (scatterView) scatterView.refresh(); });
     }
     dispatch('datachanged');
   }
@@ -499,8 +522,8 @@
     if (!cursorMode) cursors = [];
   }
 
-  /** Switch to `mode` (plot/table/dist/spectrum/spectrogram); mounts + refreshes the target view on switch. */
-  export async function setViewMode(mode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram'): Promise<void> {
+  /** Switch to `mode` (plot/table/dist/spectrum/spectrogram/scatter); mounts + refreshes the target view on switch. */
+  export async function setViewMode(mode: 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' | 'scatter'): Promise<void> {
     viewMode = mode;
     await tick();
     if (mode === 'table') {
@@ -511,6 +534,9 @@
       spectrumView?.refresh();
     } else if (mode === 'spectrogram') {
       spectrogramView?.refresh();
+    } else if (mode === 'scatter') {
+      if (columnNames.length === 0) refreshColumnNames();
+      scatterView?.refresh();
     }
     dispatch('viewmode');
   }
@@ -773,6 +799,7 @@
     else if (viewMode === 'dist') tick().then(() => distView?.refresh());
     else if (viewMode === 'spectrum') tick().then(() => spectrumView?.refresh());
     else if (viewMode === 'spectrogram') tick().then(() => spectrogramView?.refresh());
+    else if (viewMode === 'scatter') tick().then(() => scatterView?.refresh());
   }
 
   /**
@@ -800,7 +827,7 @@
   export function getSeriesInfo(): SeriesInfoEntry[] { return seriesInfo; }
   export function getViewState(): ViewState | null { return viewState; }
   export function getDrawMode(): DrawMode { return drawMode; }
-  export function getViewMode(): 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' { return viewMode; }
+  export function getViewMode(): 'plot' | 'table' | 'dist' | 'spectrum' | 'spectrogram' | 'scatter' { return viewMode; }
   export function getShowGrid(): boolean { return showGrid; }
   export function getCursorMode(): boolean { return cursorMode; }
   export function getHasData(): boolean { return hasData; }
@@ -828,6 +855,17 @@
     } else if (viewMode === 'spectrogram') {
       spectrogramView?.refresh();
     }
+  }
+
+  // ── Scatter view X/Y column selectors (header dropdowns) ────────────────
+  /** `<select>` values are strings — coerce back to the column index. */
+  function onScatterXChange(e: Event): void {
+    scatterX = Number((e.target as HTMLSelectElement).value);
+    scatterView?.refresh();
+  }
+  function onScatterYChange(e: Event): void {
+    scatterY = Number((e.target as HTMLSelectElement).value);
+    scatterView?.refresh();
   }
 </script>
 
@@ -864,6 +902,12 @@
       on:click={() => setViewMode('spectrogram')}
       title="Spectrogram view"
     >Spectrogram</button>
+    <button
+      class="view-tab"
+      class:active={viewMode === 'scatter'}
+      on:click={() => setViewMode('scatter')}
+      title="Scatter (XY) view"
+    >Scatter</button>
     {#if (viewMode === 'spectrum' || viewMode === 'spectrogram') && !xIsTime}
       <input
         class="sample-rate-input"
@@ -874,6 +918,28 @@
         on:change={onSampleRateInput}
         title="Sample rate (Hz) — needed for real frequency labels because this X axis has no timestamps to infer from"
       />
+    {/if}
+    {#if viewMode === 'scatter'}
+      <select
+        class="scatter-axis-select"
+        value={scatterX}
+        on:change={onScatterXChange}
+        title="X axis column"
+      >
+        {#each columnNames as name, i}
+          <option value={i}>X: {name}</option>
+        {/each}
+      </select>
+      <select
+        class="scatter-axis-select"
+        value={scatterY}
+        on:change={onScatterYChange}
+        title="Y axis column"
+      >
+        {#each columnNames as name, i}
+          <option value={i}>Y: {name}</option>
+        {/each}
+      </select>
     {/if}
   </div>
 {/if}
@@ -887,6 +953,8 @@
   <SpectrumView bind:this={spectrumView} {renderer} {sampleRate} />
 {:else if hasData && viewMode === 'spectrogram'}
   <SpectrogramView bind:this={spectrogramView} {renderer} seriesIndex={selectedSeriesIndex} {sampleRate} />
+{:else if hasData && viewMode === 'scatter'}
+  <ScatterView bind:this={scatterView} {renderer} xCol={scatterX} yCol={scatterY} />
 {/if}
 
 <!-- Plot canvas + axis overlay — fills the remaining space; hidden (not unmounted) outside plot mode -->
@@ -994,6 +1062,24 @@
   }
 
   .sample-rate-input:focus {
+    outline: none;
+    border-color: var(--btn-active-border);
+  }
+
+  /* Scatter-view X/Y column selectors (header). */
+  .scatter-axis-select {
+    margin-left: 4px;
+    padding: 3px 6px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    max-width: 160px;
+  }
+
+  .scatter-axis-select:focus {
     outline: none;
     border-color: var(--btn-active-border);
   }

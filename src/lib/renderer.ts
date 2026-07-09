@@ -80,6 +80,12 @@ export interface SpectrogramData {
   duration_s: number;
 }
 
+export interface ScatterData {
+  xs: number[];
+  ys: number[];
+  n: number;
+}
+
 /**
  * Wrapper around the WASM `OxidePlot` GPU renderer.
  *
@@ -415,6 +421,16 @@ export class Renderer {
   seriesSpectrogram(sourceIndex: number, window: number, sampleRate?: number): SpectrogramData {
     this.assertPlot();
     return (this.plot as any).series_spectrogram(sourceIndex, window, sampleRate ?? undefined) as SpectrogramData;
+  }
+
+  /**
+   * Return `{ xs, ys, n }` for the Scatter (XY) view: dataset columns
+   * `xCol` and `yCol` read as f64 (X tries datetime first), zipped, and
+   * filtered to finite pairs in row order.
+   */
+  scatterData(xCol: number, yCol: number): ScatterData {
+    this.assertPlot();
+    return (this.plot as any).scatter_data(xCol, yCol) as ScatterData;
   }
 
   // ── Table API ─────────────────────────────────────────────────────────────
