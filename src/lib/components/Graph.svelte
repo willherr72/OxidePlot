@@ -197,6 +197,9 @@
   function onPointerDown(e: PointerEvent) {
     // Ask App to focus this graph regardless of button.
     dispatch('focusrequest');
+    // Nothing to pan/zoom on an empty graph — don't start a drag (avoids drawing
+    // a zoom band or zooming a view that has no data).
+    if (!hasData) return;
     const rect = canvas.getBoundingClientRect();
     pointerDownCssX = e.clientX - rect.left;
     pointerDownCssY = e.clientY - rect.top;
