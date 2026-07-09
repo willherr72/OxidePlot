@@ -30,7 +30,7 @@ use oxideplot_core::data::loader::resolve_col;
 use oxideplot_core::processing::downsampling::minmax_envelope;
 use oxideplot_core::processing::expr::{apply_filter, collect_expr_cols, eval_expr, parse_expr, rolling_compute};
 use oxideplot_core::processing::histogram::histogram as core_histogram;
-use oxideplot_core::processing::qc::{health_check as core_health_check, longest_constant_run};
+use oxideplot_core::processing::qc::{health_check as core_health_check, longest_constant_run, Finding, Severity};
 use oxideplot_core::processing::spectral::{compute_psd, compute_spectrogram, infer_sample_rate};
 use oxideplot_core::processing::statistics::pearson;
 
@@ -431,6 +431,27 @@ struct RenderGraphParams {
     /// dropped). Good for series spanning orders of magnitude.
     #[serde(default)]
     y_scale: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ReportParams {
+    /// Dataset id returned by load_csv.
+    dataset_id: String,
+    /// Report title. Omit to default to the dataset id.
+    #[serde(default)]
+    title: Option<String>,
+    /// Columns (names or indices) to feature in the overview plot. Omit for all
+    /// numeric columns (capped at 8).
+    #[serde(default)]
+    columns: Option<Vec<String>>,
+    /// Max number of plots to include: an overview plus one per significant
+    /// finding (default 6).
+    #[serde(default)]
+    max_plots: Option<usize>,
+    /// File path to write the HTML report to. Omit for a generated path in the
+    /// system temp directory (oxideplot_report_<dataset>_<timestamp>.html).
+    #[serde(default)]
+    output_path: Option<String>,
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -1438,7 +1459,7 @@ impl OxidePlot {
         }): Parameters<RenderGraphParams>,
     ) -> Result<CallToolResult, McpError> {
         // Build per-panel render inputs under the lock; render without holding it.
-        let (panels, panel_w, panel_h, out_h, clear, x_is_time, y_is_log, text) = {
+        let (prep, text) = {
             let s = self.session.lock().await;
             let g = s.graphs.get(&graph_id).ok_or_else(|| {
                 McpError::invalid_params(format!("unknown graph_id '{graph_id}'"), None)
@@ -1461,159 +1482,55 @@ impl OxidePlot {
                 Some(k) => Transform::parse(Some(k), transform_window),
                 None => g.transform,
             };
-
-            // X values: datetime → epoch-second timestamps, else numeric.
-            let xcol = &ds.data.column_data[g.x_col];
-            let (xs, x_is_time): (Vec<f64>, bool) = match column_to_timestamps(xcol) {
-                Some((v, _)) => (v, true),
-                None => (column_to_f64(xcol).0, false),
+            // Effective spec: the stored graph with this render's layout/transform
+            // overrides folded in (GraphSpec itself carries no window/downsample
+            // state — that lives in RenderWindow below).
+            let eff_spec = GraphSpec {
+                dataset_id: g.dataset_id.clone(),
+                x_col: g.x_col,
+                y_cols: g.y_cols.clone(),
+                draw_mode: g.draw_mode,
+                layout: lay,
+                transform: tf,
+                title: g.title.clone(),
+            };
+            let win = RenderWindow {
+                row_start,
+                row_end,
+                x_min,
+                x_max,
+                downsample: downsample.clone(),
+                robust: autoscale.as_deref() == Some("robust"),
+                y_log: y_scale.as_deref() == Some("log"),
             };
 
-            // Per-series finite points + colour + own y-range. Very large series
-            // are LTTB-downsampled to ~2×width for rendering (keeps the shape,
-            // renders fast — this is the win for files too big to read directly).
-            let render_cap = (w as usize) * 2;
-            let ds_mode = downsample.as_deref().unwrap_or("minmax");
-            let robust = autoscale.as_deref() == Some("robust");
-            let y_is_log = y_scale.as_deref() == Some("log");
-            let mut sdata: Vec<PanelSeries> = Vec::new();
-            let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
-            let mut max_raw_points = 0usize;
-            let mut any_downsampled = false;
-            for (k, &yc) in g.y_cols.iter().enumerate() {
-                let (ysv, _) = column_to_f64(&ds.data.column_data[yc]);
-                let ysv = tf.apply(&xs, &ysv); // optional transform (smooth/derivative/integral)
-
-                // Finite (x, y) pairs + y-range over the FULL series.
-                let mut fx: Vec<f64> = Vec::new();
-                let mut fy: Vec<f64> = Vec::new();
-                let (mut ymn, mut ymx) = (f64::INFINITY, f64::NEG_INFINITY);
-                for (row, (&x, &y)) in xs.iter().zip(ysv.iter()).enumerate() {
-                    if row_start.is_some_and(|rs| row < rs) || row_end.is_some_and(|re| row >= re) {
-                        continue;
-                    }
-                    if !x.is_finite() || !y.is_finite() {
-                        continue;
-                    }
-                    if x_min.is_some_and(|xm| x < xm) || x_max.is_some_and(|xx| x > xx) {
-                        continue;
-                    }
-                    fx.push(x);
-                    fy.push(y);
-                    xmin = xmin.min(x);
-                    xmax = xmax.max(x);
-                    ymn = ymn.min(y);
-                    ymx = ymx.max(y);
-                }
-
-                // Log-Y: keep positive values, map to log10, and re-fit the y-range.
-                if y_is_log {
-                    let mut lx = Vec::with_capacity(fx.len());
-                    let mut ly = Vec::with_capacity(fy.len());
-                    ymn = f64::INFINITY;
-                    ymx = f64::NEG_INFINITY;
-                    for (&x, &y) in fx.iter().zip(fy.iter()) {
-                        if y > 0.0 {
-                            let l = y.log10();
-                            lx.push(x);
-                            ly.push(l);
-                            ymn = ymn.min(l);
-                            ymx = ymx.max(l);
-                        }
-                    }
-                    fx = lx;
-                    fy = ly;
-                }
-                max_raw_points = max_raw_points.max(fx.len());
-
-                // Downsample for rendering if there are far more points than pixels.
-                // Default "minmax" keeps each bucket's extremes so spikes survive.
-                let (fx, fy) = if ds_mode != "none" && fx.len() > render_cap * 2 {
-                    any_downsampled = true;
-                    if ds_mode == "lttb" {
-                        lttb_downsample(&fx, &fy, render_cap)
-                    } else {
-                        minmax_envelope(&fx, &fy, w as usize)
-                    }
-                } else {
-                    (fx, fy)
-                };
-
-                let pts: Vec<[f32; 2]> = fx
-                    .iter()
-                    .zip(fy.iter())
-                    .map(|(&x, &y)| [x as f32, y as f32])
-                    .collect();
-                sdata.push(PanelSeries {
-                    name: ds.data.columns[yc].clone(),
-                    color: PALETTE[k % PALETTE.len()],
-                    points: pts,
-                    ymin: ymn,
-                    ymax: ymx,
-                });
-            }
-            if !xmin.is_finite() || (xmax - xmin) <= 0.0 {
-                return Err(McpError::internal_error(
-                    "no finite data to plot for this graph".to_string(),
-                    None,
-                ));
-            }
-            let xpad = ((xmax - xmin) * 0.03).max(1e-9);
-            let x_view = (xmin - xpad, xmax + xpad);
-
-            // Panels: overlay/normalized → 1 panel (all series); stacked → 1 per series.
-            let (n, panel_h) = match lay {
-                Layout::Stacked => {
-                    let n = sdata.len().max(1) as u32;
-                    (n, (h / n).max(60))
-                }
-                _ => (1u32, h),
-            };
-            let normalize = lay == Layout::Normalized;
-            let mut panels: Vec<(Vec<SeriesGpuData>, GridGpuData, PlotUniforms)> = Vec::new();
-            if lay == Layout::Stacked {
-                for sd in &sdata {
-                    panels.push(build_panel(
-                        std::slice::from_ref(sd),
-                        x_view,
-                        w,
-                        panel_h,
-                        g.draw_mode,
-                        false,
-                        robust,
-                    ));
-                }
-            } else {
-                panels.push(build_panel(
-                    &sdata, x_view, w, panel_h, g.draw_mode, normalize, robust,
-                ));
-            }
-            let out_h = panel_h * n;
+            let prep = prepare_render(&ds.data, &eff_spec, w, h, &win)
+                .map_err(|e| McpError::internal_error(e, None))?;
 
             // Text companion.
-            let x_ticks: Vec<String> = compute_grid_lines(x_view.0, x_view.1)
+            let x_ticks: Vec<String> = compute_grid_lines(prep.x_view.0, prep.x_view.1)
                 .iter()
                 .filter(|(_, m)| *m)
                 .map(|(v, _)| {
-                    if x_is_time {
+                    if prep.x_is_time {
                         format_timestamp(*v)
                     } else {
                         format_tick_value(*v)
                     }
                 })
                 .collect();
-            let x_range_json = if x_is_time {
-                json!([format_timestamp(xmin), format_timestamp(xmax)])
+            let x_range_json = if prep.x_is_time {
+                json!([format_timestamp(prep.xmin), format_timestamp(prep.xmax)])
             } else {
-                json!([xmin, xmax])
+                json!([prep.xmin, prep.xmax])
             };
-            let legend: Vec<serde_json::Value> = sdata
+            let legend: Vec<serde_json::Value> = prep
+                .legend
                 .iter()
-                .map(|sd| {
-                    let c = sd.color;
+                .map(|(name, c, ymin, ymax)| {
                     json!({
-                        "series": sd.name,
-                        "y_range": [sd.ymin, sd.ymax],
+                        "series": name,
+                        "y_range": [ymin, ymax],
                         "color_rgb": [(c[0]*255.0) as u8, (c[1]*255.0) as u8, (c[2]*255.0) as u8],
                     })
                 })
@@ -1623,119 +1540,35 @@ impl OxidePlot {
                 Layout::Normalized => "Normalized: each series rescaled to 0..1 so shapes are comparable regardless of scale.",
                 Layout::Overlay => "Overlay: all series share one Y axis (a large-scale series can dwarf a small one).",
             };
+            let ds_mode = downsample.as_deref().unwrap_or("minmax");
+            let robust = autoscale.as_deref() == Some("robust");
             let text = json!({
-                "title": g.title.clone(),
+                "title": eff_spec.title.clone(),
                 "layout": lay.as_str(),
                 "transform": tf.label(),
                 "x_axis": ds.data.columns[g.x_col].clone(),
-                "x_is_time": x_is_time,
+                "x_is_time": prep.x_is_time,
                 "x_range": x_range_json,
                 "x_ticks": x_ticks,
                 "series": legend,
-                "size": [w, out_h],
-                "points_per_series": max_raw_points,
-                "downsampled_for_render": any_downsampled,
+                "size": [prep.panel_w, prep.out_h],
+                "points_per_series": prep.max_raw_points,
+                "downsampled_for_render": prep.any_downsampled,
                 "downsample": ds_mode,
                 "autoscale": if robust { "robust" } else { "minmax" },
-                "y_scale": if y_is_log { "log" } else { "linear" },
+                "y_scale": if prep.y_is_log { "log" } else { "linear" },
                 "window": { "row_start": row_start, "row_end": row_end, "x_min": x_min, "x_max": x_max },
                 "note": note,
             })
             .to_string();
 
-            let clear = [0.055_f64, 0.059, 0.075, 1.0];
-            (panels, w, panel_h, out_h, clear, x_is_time, y_is_log, text)
+            (prep, text)
         };
 
-        // Render off the lock, on a blocking thread (GPU read-back blocks).
-        let rgba = tokio::task::spawn_blocking(move || {
-            pollster::block_on(async move {
-                let r = PlotRenderer::new_offscreen(panel_w, panel_h).await;
-                let mut buf: Vec<u8> = if panels.len() == 1 {
-                    let (series, grid, uniforms) = &panels[0];
-                    let calls = r.build_draw_calls(series, grid, *uniforms);
-                    r.render_to_rgba(&calls, clear)
-                } else {
-                    // Stacked: render each panel, composite vertically into one image.
-                    let cb = [
-                        (clear[0] * 255.0) as u8,
-                        (clear[1] * 255.0) as u8,
-                        (clear[2] * 255.0) as u8,
-                        255u8,
-                    ];
-                    let row_bytes = (panel_w * 4) as usize;
-                    let mut composite: Vec<u8> = Vec::with_capacity((panel_w * out_h * 4) as usize);
-                    for _ in 0..(panel_w * out_h) {
-                        composite.extend_from_slice(&cb);
-                    }
-                    for (i, (series, grid, uniforms)) in panels.iter().enumerate() {
-                        let calls = r.build_draw_calls(series, grid, *uniforms);
-                        let prgba = r.render_to_rgba(&calls, clear);
-                        let y0 = i as u32 * panel_h;
-                        for row in 0..panel_h {
-                            let src = (row * panel_w * 4) as usize;
-                            let dst = ((y0 + row) * panel_w * 4) as usize;
-                            composite[dst..dst + row_bytes]
-                                .copy_from_slice(&prgba[src..src + row_bytes]);
-                        }
-                        // Thin separator between panels (not after the last).
-                        if i + 1 < panels.len() {
-                            let sy = y0 + panel_h - 1;
-                            let base = (sy * panel_w * 4) as usize;
-                            for px in 0..panel_w as usize {
-                                let o = base + px * 4;
-                                composite[o..o + 4].copy_from_slice(&[90, 94, 104, 255]);
-                            }
-                        }
-                    }
-                    composite
-                };
-
-                // Bake numeric tick labels onto each panel (map tick value → pixel
-                // via the panel's view). Title/legend stay in the text companion.
-                let lc = [198u8, 204, 214, 255];
-                for (i, (_, _, u)) in panels.iter().enumerate() {
-                    let y_off = i as u32 * panel_h;
-                    let (vxmin, vxmax) = (u.view_min[0] as f64, u.view_max[0] as f64);
-                    let (vymin, vymax) = (u.view_min[1] as f64, u.view_max[1] as f64);
-                    let xspan = (vxmax - vxmin).max(1e-12);
-                    let yspan = (vymax - vymin).max(1e-12);
-                    let x_scale = if x_is_time { 1 } else { 2 }; // datetime labels are longer
-                    for (v, major) in compute_grid_lines(vxmin, vxmax) {
-                        if !major {
-                            continue;
-                        }
-                        let px = (((v - vxmin) / xspan) * panel_w as f64) as i32;
-                        draw_text(
-                            &mut buf,
-                            panel_w,
-                            out_h,
-                            &fmt_x_tick(v, x_is_time, vxmax - vxmin),
-                            px + 3,
-                            (y_off + panel_h) as i32 - if x_is_time { 10 } else { 15 },
-                            lc,
-                            x_scale,
-                        );
-                    }
-                    for (v, major) in compute_grid_lines(vymin, vymax) {
-                        if !major {
-                            continue;
-                        }
-                        let py = ((1.0 - (v - vymin) / yspan) * panel_h as f64) as i32 + y_off as i32;
-                        // Log-Y: labels show the real value (10^tick), not the log.
-                        let ylabel = if y_is_log {
-                            format_tick_value(10f64.powf(v))
-                        } else {
-                            format_tick_value(v)
-                        };
-                        draw_text(&mut buf, panel_w, out_h, &ylabel, 3, py - 5, lc, 2);
-                    }
-                }
-                buf
-            })
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("render task failed: {e}"), None))?;
+        let (panel_w, out_h) = (prep.panel_w, prep.out_h);
+        let rgba = render_rgba(prep)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
 
         // Encode PNG → base64 → image content.
         let img = image::RgbaImage::from_raw(panel_w, out_h, rgba).ok_or_else(|| {
@@ -1750,6 +1583,290 @@ impl OxidePlot {
             Content::image(b64, "image/png".to_string()),
             Content::text(text),
         ]))
+    }
+
+    #[tool(
+        description = "Generate the deliverable of a tool-test: a single self-contained HTML QC report for a dataset — health_check findings (with a verdict banner), auto-selected plots (an overview of the numeric columns plus one focused plot per significant finding), and a flagged-rows table — written to disk ready to hand off. Fully automatic by default; 'columns'/'max_plots'/'output_path' are optional overrides."
+    )]
+    async fn report(
+        &self,
+        Parameters(ReportParams {
+            dataset_id,
+            title,
+            columns,
+            max_plots,
+            output_path,
+        }): Parameters<ReportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let max_plots = max_plots.unwrap_or(6).clamp(1, 20);
+
+        let (findings, data_summary, plot_specs, flagged_cols, flagged_rows, total_flagged) = {
+            let s = self.session.lock().await;
+            let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+                McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+            })?;
+
+            let findings = core_health_check(&ds.data, &ds.numeric_cols, None);
+
+            // --- Dataset summary ---
+            let n_rows = ds.data.row_count;
+            let n_cols = ds.data.columns.len();
+            let n_numeric = ds.numeric_cols.iter().filter(|&&b| b).count();
+            let dt_col = (0..ds.data.columns.len()).find(|&c| {
+                column_to_timestamps(&ds.data.column_data[c])
+                    .map(|(_, f)| f >= 0.5)
+                    .unwrap_or(false)
+            });
+            let time_range = dt_col.and_then(|c| {
+                let (ts, _) = column_to_timestamps(&ds.data.column_data[c])?;
+                let finite: Vec<f64> = ts.iter().copied().filter(|v| v.is_finite()).collect();
+                if finite.is_empty() {
+                    return None;
+                }
+                let mn = finite.iter().cloned().fold(f64::INFINITY, f64::min);
+                let mx = finite.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                Some((format_timestamp(mn), format_timestamp(mx)))
+            });
+            let data_summary = json!({
+                "n_rows": n_rows,
+                "n_columns": n_cols,
+                "n_numeric_columns": n_numeric,
+                "time_range": time_range.as_ref().map(|(a, b)| json!({ "start": a, "end": b })),
+            });
+
+            // --- Auto-select plots (capped at max_plots) ---
+            // X: first datetime column if any, else the first numeric column.
+            let x_col = dt_col.or_else(|| (0..ds.data.columns.len()).find(|&c| ds.numeric_cols[c]));
+            let mut plot_specs: Vec<(String, GraphSpec)> = Vec::new();
+            if let Some(x) = x_col {
+                let overview_y: Vec<usize> = match &columns {
+                    Some(names) => names
+                        .iter()
+                        .filter_map(|n| resolve_col(&ds.data, n))
+                        .filter(|&c| ds.numeric_cols[c])
+                        .collect(),
+                    None => (0..ds.data.columns.len())
+                        .filter(|&c| ds.numeric_cols[c] && Some(c) != dt_col)
+                        .take(8)
+                        .collect(),
+                };
+                if !overview_y.is_empty() {
+                    let lay = if overview_y.len() > 3 { Layout::Stacked } else { Layout::Overlay };
+                    plot_specs.push((
+                        "Overview".to_string(),
+                        GraphSpec {
+                            dataset_id: dataset_id.clone(),
+                            x_col: x,
+                            y_cols: overview_y,
+                            draw_mode: DrawMode::Lines,
+                            layout: lay,
+                            transform: Transform::None,
+                            title: Some("Overview".to_string()),
+                        },
+                    ));
+                }
+
+                // One focused plot per significant finding that names a column
+                // (changepoint / regime_change_event / glitch / outlier_regime),
+                // de-duplicated by column, most severe first (findings are
+                // already severity-sorted).
+                let mut seen_cols: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for f in &findings {
+                    if plot_specs.len() >= max_plots {
+                        break;
+                    }
+                    if !matches!(
+                        f.kind.as_str(),
+                        "changepoint" | "regime_change_event" | "glitch" | "outlier_regime"
+                    ) {
+                        continue;
+                    }
+                    let Some(col_name) = f
+                        .column
+                        .clone()
+                        .or_else(|| f.affected.as_ref().and_then(|a| a.first().cloned()))
+                    else {
+                        continue;
+                    };
+                    if !seen_cols.insert(col_name.clone()) {
+                        continue;
+                    }
+                    let Some(ci) = resolve_col(&ds.data, &col_name) else {
+                        continue;
+                    };
+                    if !ds.numeric_cols[ci] || Some(ci) == Some(x) {
+                        continue;
+                    }
+                    let row_ref = f
+                        .row
+                        .or(f.onset_row)
+                        .or_else(|| f.rows.as_ref().and_then(|r| r.first()).map(|r| r[0]));
+                    let caption = match row_ref {
+                        Some(r) => format!("{} — {} (row ~{r})", f.kind, col_name),
+                        None => format!("{} — {}", f.kind, col_name),
+                    };
+                    plot_specs.push((
+                        caption,
+                        GraphSpec {
+                            dataset_id: dataset_id.clone(),
+                            x_col: x,
+                            y_cols: vec![ci],
+                            draw_mode: DrawMode::Lines,
+                            layout: Layout::Overlay,
+                            transform: Transform::None,
+                            title: Some(col_name),
+                        },
+                    ));
+                }
+                plot_specs.truncate(max_plots);
+            }
+
+            // --- Flagged rows: collect from findings' row/rows/onset_row ---
+            const MAX_TRACKED_FLAGGED: usize = 5000;
+            let mut flagged_row_set: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+            let mut flagged_col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for f in &findings {
+                if let Some(col) = &f.column {
+                    flagged_col_set.insert(col.clone());
+                }
+                if let Some(affected) = &f.affected {
+                    for a in affected {
+                        flagged_col_set.insert(a.clone());
+                    }
+                }
+                if let Some(r) = f.row {
+                    flagged_row_set.insert(r);
+                }
+                if let Some(r) = f.onset_row {
+                    flagged_row_set.insert(r);
+                }
+                if let Some(r) = f.first_gap_row {
+                    flagged_row_set.insert(r);
+                }
+                if let Some(ranges) = &f.rows {
+                    'ranges: for rg in ranges {
+                        for r in rg[0]..=rg[1] {
+                            if flagged_row_set.len() >= MAX_TRACKED_FLAGGED {
+                                break 'ranges;
+                            }
+                            flagged_row_set.insert(r);
+                        }
+                    }
+                }
+            }
+            let total_flagged = flagged_row_set.len();
+            let mut display_cols: Vec<usize> = if flagged_col_set.is_empty() {
+                (0..ds.data.columns.len()).filter(|&c| ds.numeric_cols[c]).take(6).collect()
+            } else {
+                flagged_col_set.iter().filter_map(|n| resolve_col(&ds.data, n)).collect()
+            };
+            display_cols.truncate(8);
+            let flagged_col_names: Vec<String> =
+                display_cols.iter().map(|&c| ds.data.columns[c].clone()).collect();
+            let flagged_rows: Vec<(usize, Vec<String>)> = flagged_row_set
+                .iter()
+                .take(50)
+                .map(|&r| {
+                    let vals = display_cols
+                        .iter()
+                        .map(|&c| ds.data.column_data[c].get(r).cloned().unwrap_or_default())
+                        .collect();
+                    (r, vals)
+                })
+                .collect();
+
+            (findings, data_summary, plot_specs, flagged_col_names, flagged_rows, total_flagged)
+        };
+
+        // --- Render the auto-selected plots (off the lock; re-lock briefly per
+        // plot only for the CPU-side prepare step — GPU work never holds it). ---
+        let mut plots: Vec<(String, String)> = Vec::new();
+        let mut plot_errors: Vec<String> = Vec::new();
+        for (caption, spec) in &plot_specs {
+            let h: u32 = if spec.layout == Layout::Stacked {
+                (spec.y_cols.len() as u32 * 130).clamp(280, 900)
+            } else {
+                340
+            };
+            let png = {
+                let s = self.session.lock().await;
+                let ds = s.datasets.get(&dataset_id).ok_or_else(|| {
+                    McpError::invalid_params(format!("unknown dataset_id '{dataset_id}'"), None)
+                })?;
+                render_spec_to_png(&ds.data, spec, 880, h).await
+            };
+            match png {
+                Ok(bytes) => plots.push((caption.clone(), base64::engine::general_purpose::STANDARD.encode(&bytes))),
+                Err(e) => plot_errors.push(format!("{caption}: {e}")),
+            }
+        }
+
+        // --- Assemble the self-contained HTML report ---
+        let report_title = title.unwrap_or_else(|| dataset_id.clone());
+        let generated_at = format_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+        );
+        let html = build_report_html(
+            &report_title,
+            &generated_at,
+            &data_summary,
+            &findings,
+            &plots,
+            &flagged_cols,
+            &flagged_rows,
+            total_flagged,
+        );
+
+        // --- Write to disk ---
+        let out_path = match output_path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let safe_id: String = dataset_id
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                std::env::temp_dir().join(format!("oxideplot_report_{safe_id}_{ts}.html"))
+            }
+        };
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    McpError::internal_error(
+                        format!("failed to create directory '{}': {e}", parent.display()),
+                        None,
+                    )
+                })?;
+            }
+        }
+        std::fs::write(&out_path, &html).map_err(|e| {
+            McpError::internal_error(format!("failed to write '{}': {e}", out_path.display()), None)
+        })?;
+        let abs_path = if out_path.is_absolute() {
+            out_path.clone()
+        } else {
+            std::env::current_dir().map(|cwd| cwd.join(&out_path)).unwrap_or(out_path.clone())
+        };
+
+        let n_high = findings.iter().filter(|f| matches!(f.severity, Severity::High)).count();
+        let n_medium = findings.iter().filter(|f| matches!(f.severity, Severity::Medium)).count();
+        let n_low = findings.iter().filter(|f| matches!(f.severity, Severity::Low)).count();
+
+        Ok(Self::text_result(json!({
+            "report_path": abs_path.display().to_string(),
+            "n_findings": findings.len(),
+            "n_plots": plots.len(),
+            "severities": { "high": n_high, "medium": n_medium, "low": n_low },
+            "flagged_rows_total": total_flagged,
+            "plot_errors": plot_errors,
+            "note": "Open this HTML file to view/hand off the report.",
+        })))
     }
 }
 
@@ -1873,6 +1990,324 @@ fn build_panel(
     (gpu_series, grid, uniforms)
 }
 
+/// Windowing/downsample/scale options for a single render, layered on top of a
+/// `GraphSpec`'s own layout/transform. `RenderWindow::default()` renders the
+/// full series with the standard minmax downsample/autoscale and linear Y —
+/// what `report`'s auto-selected plots use; `render_graph` threads its
+/// override params through here.
+#[derive(Default)]
+struct RenderWindow {
+    row_start: Option<usize>,
+    row_end: Option<usize>,
+    x_min: Option<f64>,
+    x_max: Option<f64>,
+    downsample: Option<String>,
+    robust: bool,
+    y_log: bool,
+}
+
+/// Prepared per-panel render inputs for a `GraphSpec`, built while the caller
+/// still holds whatever lock guards the source data — nothing here borrows
+/// `LoadedData`, so it safely outlives the lock. Also carries the raw
+/// ingredients `render_graph` needs for its text companion (JSON assembly
+/// stays in the tool, per its existing contract).
+struct RenderPrep {
+    panels: Vec<(Vec<SeriesGpuData>, GridGpuData, PlotUniforms)>,
+    panel_w: u32,
+    panel_h: u32,
+    out_h: u32,
+    x_is_time: bool,
+    y_is_log: bool,
+    x_view: (f64, f64),
+    xmin: f64,
+    xmax: f64,
+    /// Per-series (name, color, y_min, y_max) in draw order.
+    legend: Vec<(String, [f32; 4], f64, f64)>,
+    max_raw_points: usize,
+    any_downsampled: bool,
+}
+
+/// Build everything needed to GPU-render a `GraphSpec` over `data` — series
+/// points (windowed/downsampled/scaled per `win`), panel layout, and the
+/// legend/axis facts `render_graph` folds into its text companion. Pure CPU
+/// work; no GPU/lock involved, so callers can run this under a lock and then
+/// drop it before the actual (blocking) render. This is the "GraphSpec +
+/// LoadedData + size → renderable panels" core both `render_graph` and
+/// `render_spec_to_png` share.
+fn prepare_render(
+    data: &LoadedData,
+    spec: &GraphSpec,
+    width: u32,
+    height: u32,
+    win: &RenderWindow,
+) -> Result<RenderPrep, String> {
+    let w = width.clamp(200, 2000);
+    let h = height.clamp(150, 1400);
+    let lay = spec.layout;
+    let tf = spec.transform;
+
+    // X values: datetime → epoch-second timestamps, else numeric.
+    let xcol = &data.column_data[spec.x_col];
+    let (xs, x_is_time): (Vec<f64>, bool) = match column_to_timestamps(xcol) {
+        Some((v, _)) => (v, true),
+        None => (column_to_f64(xcol).0, false),
+    };
+
+    // Per-series finite points + colour + own y-range. Very large series
+    // are downsampled to ~2×width for rendering (keeps the shape, renders
+    // fast — this is the win for files too big to read directly).
+    let render_cap = (w as usize) * 2;
+    let ds_mode = win.downsample.as_deref().unwrap_or("minmax");
+    let robust = win.robust;
+    let y_is_log = win.y_log;
+    let mut sdata: Vec<PanelSeries> = Vec::new();
+    let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut max_raw_points = 0usize;
+    let mut any_downsampled = false;
+    for (k, &yc) in spec.y_cols.iter().enumerate() {
+        let (ysv, _) = column_to_f64(&data.column_data[yc]);
+        let ysv = tf.apply(&xs, &ysv); // optional transform (smooth/derivative/integral)
+
+        // Finite (x, y) pairs + y-range over the FULL series.
+        let mut fx: Vec<f64> = Vec::new();
+        let mut fy: Vec<f64> = Vec::new();
+        let (mut ymn, mut ymx) = (f64::INFINITY, f64::NEG_INFINITY);
+        for (row, (&x, &y)) in xs.iter().zip(ysv.iter()).enumerate() {
+            if win.row_start.is_some_and(|rs| row < rs) || win.row_end.is_some_and(|re| row >= re) {
+                continue;
+            }
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            if win.x_min.is_some_and(|xm| x < xm) || win.x_max.is_some_and(|xx| x > xx) {
+                continue;
+            }
+            fx.push(x);
+            fy.push(y);
+            xmin = xmin.min(x);
+            xmax = xmax.max(x);
+            ymn = ymn.min(y);
+            ymx = ymx.max(y);
+        }
+
+        // Log-Y: keep positive values, map to log10, and re-fit the y-range.
+        if y_is_log {
+            let mut lx = Vec::with_capacity(fx.len());
+            let mut ly = Vec::with_capacity(fy.len());
+            ymn = f64::INFINITY;
+            ymx = f64::NEG_INFINITY;
+            for (&x, &y) in fx.iter().zip(fy.iter()) {
+                if y > 0.0 {
+                    let l = y.log10();
+                    lx.push(x);
+                    ly.push(l);
+                    ymn = ymn.min(l);
+                    ymx = ymx.max(l);
+                }
+            }
+            fx = lx;
+            fy = ly;
+        }
+        max_raw_points = max_raw_points.max(fx.len());
+
+        // Downsample for rendering if there are far more points than pixels.
+        // Default "minmax" keeps each bucket's extremes so spikes survive.
+        let (fx, fy) = if ds_mode != "none" && fx.len() > render_cap * 2 {
+            any_downsampled = true;
+            if ds_mode == "lttb" {
+                lttb_downsample(&fx, &fy, render_cap)
+            } else {
+                minmax_envelope(&fx, &fy, w as usize)
+            }
+        } else {
+            (fx, fy)
+        };
+
+        let pts: Vec<[f32; 2]> = fx
+            .iter()
+            .zip(fy.iter())
+            .map(|(&x, &y)| [x as f32, y as f32])
+            .collect();
+        sdata.push(PanelSeries {
+            name: data.columns[yc].clone(),
+            color: PALETTE[k % PALETTE.len()],
+            points: pts,
+            ymin: ymn,
+            ymax: ymx,
+        });
+    }
+    if !xmin.is_finite() || (xmax - xmin) <= 0.0 {
+        return Err("no finite data to plot for this graph".to_string());
+    }
+    let xpad = ((xmax - xmin) * 0.03).max(1e-9);
+    let x_view = (xmin - xpad, xmax + xpad);
+
+    // Panels: overlay/normalized → 1 panel (all series); stacked → 1 per series.
+    let (n, panel_h) = match lay {
+        Layout::Stacked => {
+            let n = sdata.len().max(1) as u32;
+            (n, (h / n).max(60))
+        }
+        _ => (1u32, h),
+    };
+    let normalize = lay == Layout::Normalized;
+    let mut panels: Vec<(Vec<SeriesGpuData>, GridGpuData, PlotUniforms)> = Vec::new();
+    if lay == Layout::Stacked {
+        for sd in &sdata {
+            panels.push(build_panel(
+                std::slice::from_ref(sd),
+                x_view,
+                w,
+                panel_h,
+                spec.draw_mode,
+                false,
+                robust,
+            ));
+        }
+    } else {
+        panels.push(build_panel(
+            &sdata, x_view, w, panel_h, spec.draw_mode, normalize, robust,
+        ));
+    }
+    let out_h = panel_h * n;
+    let legend = sdata
+        .iter()
+        .map(|sd| (sd.name.clone(), sd.color, sd.ymin, sd.ymax))
+        .collect();
+
+    Ok(RenderPrep {
+        panels,
+        panel_w: w,
+        panel_h,
+        out_h,
+        x_is_time,
+        y_is_log,
+        x_view,
+        xmin,
+        xmax,
+        legend,
+        max_raw_points,
+        any_downsampled,
+    })
+}
+
+/// Run the GPU render + numeric tick-label baking (+ vertical compositing for
+/// a stacked layout) for a prepared render, off the tokio executor (GPU
+/// read-back blocks).
+async fn render_rgba(prep: RenderPrep) -> Result<Vec<u8>, String> {
+    let RenderPrep { panels, panel_w, panel_h, out_h, x_is_time, y_is_log, .. } = prep;
+    tokio::task::spawn_blocking(move || {
+        pollster::block_on(async move {
+            let clear = [0.055_f64, 0.059, 0.075, 1.0];
+            let r = PlotRenderer::new_offscreen(panel_w, panel_h).await;
+            let mut buf: Vec<u8> = if panels.len() == 1 {
+                let (series, grid, uniforms) = &panels[0];
+                let calls = r.build_draw_calls(series, grid, *uniforms);
+                r.render_to_rgba(&calls, clear)
+            } else {
+                // Stacked: render each panel, composite vertically into one image.
+                let cb = [
+                    (clear[0] * 255.0) as u8,
+                    (clear[1] * 255.0) as u8,
+                    (clear[2] * 255.0) as u8,
+                    255u8,
+                ];
+                let row_bytes = (panel_w * 4) as usize;
+                let mut composite: Vec<u8> = Vec::with_capacity((panel_w * out_h * 4) as usize);
+                for _ in 0..(panel_w * out_h) {
+                    composite.extend_from_slice(&cb);
+                }
+                for (i, (series, grid, uniforms)) in panels.iter().enumerate() {
+                    let calls = r.build_draw_calls(series, grid, *uniforms);
+                    let prgba = r.render_to_rgba(&calls, clear);
+                    let y0 = i as u32 * panel_h;
+                    for row in 0..panel_h {
+                        let src = (row * panel_w * 4) as usize;
+                        let dst = ((y0 + row) * panel_w * 4) as usize;
+                        composite[dst..dst + row_bytes].copy_from_slice(&prgba[src..src + row_bytes]);
+                    }
+                    // Thin separator between panels (not after the last).
+                    if i + 1 < panels.len() {
+                        let sy = y0 + panel_h - 1;
+                        let base = (sy * panel_w * 4) as usize;
+                        for px in 0..panel_w as usize {
+                            let o = base + px * 4;
+                            composite[o..o + 4].copy_from_slice(&[90, 94, 104, 255]);
+                        }
+                    }
+                }
+                composite
+            };
+
+            // Bake numeric tick labels onto each panel (map tick value → pixel
+            // via the panel's view). Title/legend stay in the text companion.
+            let lc = [198u8, 204, 214, 255];
+            for (i, (_, _, u)) in panels.iter().enumerate() {
+                let y_off = i as u32 * panel_h;
+                let (vxmin, vxmax) = (u.view_min[0] as f64, u.view_max[0] as f64);
+                let (vymin, vymax) = (u.view_min[1] as f64, u.view_max[1] as f64);
+                let xspan = (vxmax - vxmin).max(1e-12);
+                let yspan = (vymax - vymin).max(1e-12);
+                let x_scale = if x_is_time { 1 } else { 2 }; // datetime labels are longer
+                for (v, major) in compute_grid_lines(vxmin, vxmax) {
+                    if !major {
+                        continue;
+                    }
+                    let px = (((v - vxmin) / xspan) * panel_w as f64) as i32;
+                    draw_text(
+                        &mut buf,
+                        panel_w,
+                        out_h,
+                        &fmt_x_tick(v, x_is_time, vxmax - vxmin),
+                        px + 3,
+                        (y_off + panel_h) as i32 - if x_is_time { 10 } else { 15 },
+                        lc,
+                        x_scale,
+                    );
+                }
+                for (v, major) in compute_grid_lines(vymin, vymax) {
+                    if !major {
+                        continue;
+                    }
+                    let py = ((1.0 - (v - vymin) / yspan) * panel_h as f64) as i32 + y_off as i32;
+                    // Log-Y: labels show the real value (10^tick), not the log.
+                    let ylabel = if y_is_log {
+                        format_tick_value(10f64.powf(v))
+                    } else {
+                        format_tick_value(v)
+                    };
+                    draw_text(&mut buf, panel_w, out_h, &ylabel, 3, py - 5, lc, 2);
+                }
+            }
+            buf
+        })
+    })
+    .await
+    .map_err(|e| format!("render task failed: {e}"))
+}
+
+/// Render a `GraphSpec` over `data` to PNG bytes at the given size, using the
+/// standard full-range minmax downsample/autoscale and linear Y (no windowing
+/// overrides — that's `render_graph`'s job via `RenderWindow`). This is the
+/// one-shot render path used by `report`, which plots without creating
+/// persistent session graph state.
+async fn render_spec_to_png(
+    data: &LoadedData,
+    spec: &GraphSpec,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    let prep = prepare_render(data, spec, width, height, &RenderWindow::default())?;
+    let (panel_w, out_h) = (prep.panel_w, prep.out_h);
+    let rgba = render_rgba(prep).await?;
+    let img = image::RgbaImage::from_raw(panel_w, out_h, rgba)
+        .ok_or_else(|| "render produced a mis-sized buffer".to_string())?;
+    let mut png: Vec<u8> = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("PNG encode failed: {e}"))?;
+    Ok(png)
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct PingParams {
     /// Optional text; the server echoes it back. Omit for a bare liveness check.
@@ -1984,4 +2419,306 @@ fn fmt_x_tick(v: f64, x_is_time: bool, span: f64) -> String {
     } else {
         format_tick_value(v)
     }
+}
+
+// ─── report: self-contained HTML QC deliverable ────────────────────────────────
+
+/// Escape text for safe interpolation into HTML (column names / detail
+/// strings are user data and may contain markup-sensitive characters).
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Best available row/range locator for a finding, formatted for display.
+fn finding_location(f: &Finding) -> Option<String> {
+    if let Some(r) = f.row {
+        return Some(format!("row {r}"));
+    }
+    if let Some(r) = f.onset_row {
+        return Some(format!("onset row {r}"));
+    }
+    if let Some(r) = f.first_gap_row {
+        return Some(format!("first gap at row {r}"));
+    }
+    if let Some(ranges) = &f.rows {
+        if ranges.is_empty() {
+            return None;
+        }
+        let shown = ranges.iter().take(5).map(|r| format!("{}\u{2013}{}", r[0], r[1])).collect::<Vec<_>>().join(", ");
+        return Some(if ranges.len() > 5 {
+            format!("rows {shown} (+{} more)", ranges.len() - 5)
+        } else {
+            format!("rows {shown}")
+        });
+    }
+    None
+}
+
+/// Assemble the self-contained report HTML: title + summary, verdict banner,
+/// findings, auto-selected plots (inline base64 PNGs), and a flagged-rows
+/// table. No external resources — everything is inlined so the file is a
+/// standalone document that can be handed off or opened offline.
+#[allow(clippy::too_many_arguments)]
+fn build_report_html(
+    title: &str,
+    generated_at: &str,
+    data_summary: &serde_json::Value,
+    findings: &[Finding],
+    plots: &[(String, String)],
+    flagged_cols: &[String],
+    flagged_rows: &[(usize, Vec<String>)],
+    total_flagged: usize,
+) -> String {
+    let n_high = findings.iter().filter(|f| matches!(f.severity, Severity::High)).count();
+    let n_medium = findings.iter().filter(|f| matches!(f.severity, Severity::Medium)).count();
+    let n_low = findings.iter().filter(|f| matches!(f.severity, Severity::Low)).count();
+
+    let (verdict_class, verdict_text) = if findings.is_empty() {
+        ("clean".to_string(), "No issues found — clean.".to_string())
+    } else {
+        let mut parts = Vec::new();
+        if n_high > 0 {
+            parts.push(format!("{n_high} High"));
+        }
+        if n_medium > 0 {
+            parts.push(format!("{n_medium} Medium"));
+        }
+        if n_low > 0 {
+            parts.push(format!("{n_low} Low"));
+        }
+        let class = if n_high > 0 {
+            "high"
+        } else if n_medium > 0 {
+            "medium"
+        } else {
+            "low"
+        };
+        (
+            class.to_string(),
+            format!(
+                "{} finding{}: {}",
+                findings.len(),
+                if findings.len() == 1 { "" } else { "s" },
+                parts.join(", ")
+            ),
+        )
+    };
+
+    let n_rows = data_summary.get("n_rows").and_then(|v| v.as_u64()).unwrap_or(0);
+    let n_cols = data_summary.get("n_columns").and_then(|v| v.as_u64()).unwrap_or(0);
+    let n_numeric = data_summary.get("n_numeric_columns").and_then(|v| v.as_u64()).unwrap_or(0);
+    let time_range_row = match data_summary.get("time_range").and_then(|v| v.as_object()) {
+        Some(tr) => {
+            let start = tr.get("start").and_then(|v| v.as_str()).unwrap_or("?");
+            let end = tr.get("end").and_then(|v| v.as_str()).unwrap_or("?");
+            format!(
+                "<div class=\"stat\"><span class=\"stat-label\">Time range</span><span class=\"stat-value\">{} &rarr; {}</span></div>",
+                html_escape(start),
+                html_escape(end)
+            )
+        }
+        None => String::new(),
+    };
+
+    let mut findings_html = String::new();
+    if findings.is_empty() {
+        findings_html.push_str("<p class=\"muted\">No QC findings — every check passed.</p>");
+    } else {
+        findings_html.push_str("<div class=\"findings\">");
+        for f in findings {
+            let sev_class = match f.severity {
+                Severity::High => "high",
+                Severity::Medium => "medium",
+                Severity::Low => "low",
+            };
+            let sev_label = match f.severity {
+                Severity::High => "High",
+                Severity::Medium => "Medium",
+                Severity::Low => "Low",
+            };
+            let loc = finding_location(f).map(|l| format!("<span class=\"finding-loc\">{}</span>", html_escape(&l))).unwrap_or_default();
+            let col = f.column.as_ref().map(|c| format!("<span class=\"finding-col\">{}</span>", html_escape(c))).unwrap_or_default();
+            let affected = f.affected.as_ref().filter(|a| !a.is_empty()).map(|a| {
+                format!(
+                    "<div class=\"finding-extra\">affected: {}</div>",
+                    html_escape(&a.join(", "))
+                )
+            }).unwrap_or_default();
+            let culprit = f.culprit.as_ref().filter(|c| !c.is_empty()).map(|c| {
+                format!(
+                    "<div class=\"finding-extra\">likely source: {}</div>",
+                    html_escape(&c.join(", "))
+                )
+            }).unwrap_or_default();
+            findings_html.push_str(&format!(
+                "<div class=\"finding finding-{sev_class}\">\
+                    <div class=\"finding-head\"><span class=\"badge badge-{sev_class}\">{sev_label}</span>\
+                    <span class=\"finding-kind\">{kind}</span>{col}{loc}</div>\
+                    <div class=\"finding-detail\">{detail}</div>{affected}{culprit}\
+                </div>",
+                sev_class = sev_class,
+                sev_label = sev_label,
+                kind = html_escape(&f.kind),
+                col = col,
+                loc = loc,
+                detail = html_escape(&f.detail),
+                affected = affected,
+                culprit = culprit,
+            ));
+        }
+        findings_html.push_str("</div>");
+    }
+
+    let mut plots_html = String::new();
+    if plots.is_empty() {
+        plots_html.push_str("<p class=\"muted\">No plots were generated for this dataset.</p>");
+    } else {
+        for (caption, b64) in plots {
+            plots_html.push_str(&format!(
+                "<figure class=\"plot\"><img src=\"data:image/png;base64,{b64}\" alt=\"{alt}\">\
+                <figcaption>{caption}</figcaption></figure>",
+                b64 = b64,
+                alt = html_escape(caption),
+                caption = html_escape(caption),
+            ));
+        }
+    }
+
+    let mut table_html = String::new();
+    if flagged_rows.is_empty() {
+        table_html.push_str("<p class=\"muted\">No specific rows were flagged.</p>");
+    } else {
+        table_html.push_str("<div class=\"table-wrap\"><table><thead><tr><th>Row</th>");
+        for c in flagged_cols {
+            table_html.push_str(&format!("<th>{}</th>", html_escape(c)));
+        }
+        table_html.push_str("</tr></thead><tbody>");
+        for (r, vals) in flagged_rows {
+            table_html.push_str(&format!("<tr><td class=\"row-idx\">{r}</td>"));
+            for v in vals {
+                table_html.push_str(&format!("<td>{}</td>", html_escape(v)));
+            }
+            table_html.push_str("</tr>");
+        }
+        table_html.push_str("</tbody></table></div>");
+        let shown = flagged_rows.len();
+        let suffix = if total_flagged > shown { "+" } else { "" };
+        table_html.push_str(&format!(
+            "<p class=\"muted\">Showing {shown} of {total_flagged}{suffix} flagged row(s).</p>"
+        ));
+    }
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title_esc} — OxidePlot QC Report</title>
+<style>
+  :root {{
+    --bg: #ffffff; --fg: #1a1d23; --muted: #5b6270; --border: #dde1e7;
+    --card: #f7f8fa; --high: #b3261e; --high-bg: #fdecea;
+    --medium: #96660a; --medium-bg: #fdf3e0; --low: #2f6f4e; --low-bg: #e9f6ee;
+    --clean: #2f6f4e; --clean-bg: #e9f6ee; --accent: #2a5db0;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; padding: 2.5rem 3rem 4rem; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5; max-width: 980px; margin-inline: auto;
+  }}
+  h1 {{ font-size: 1.6rem; margin: 0 0 0.15rem; }}
+  h2 {{ font-size: 1.1rem; margin: 2.2rem 0 0.8rem; border-bottom: 1px solid var(--border); padding-bottom: 0.35rem; }}
+  .generated {{ color: var(--muted); font-size: 0.85rem; margin-bottom: 1.4rem; }}
+  .summary {{ display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.2rem; }}
+  .stat {{ background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.9rem; min-width: 9rem; }}
+  .stat-label {{ display: block; font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }}
+  .stat-value {{ display: block; font-size: 1.05rem; font-weight: 600; margin-top: 0.15rem; }}
+  .verdict {{ border-radius: 10px; padding: 0.9rem 1.1rem; font-weight: 600; font-size: 1.02rem; border: 1px solid; }}
+  .verdict.high {{ background: var(--high-bg); color: var(--high); border-color: var(--high); }}
+  .verdict.medium {{ background: var(--medium-bg); color: var(--medium); border-color: var(--medium); }}
+  .verdict.low {{ background: var(--low-bg); color: var(--low); border-color: var(--low); }}
+  .verdict.clean {{ background: var(--clean-bg); color: var(--clean); border-color: var(--clean); }}
+  .findings {{ display: flex; flex-direction: column; gap: 0.6rem; }}
+  .finding {{ border: 1px solid var(--border); border-left-width: 4px; border-radius: 6px; padding: 0.6rem 0.85rem; background: var(--card); }}
+  .finding-high {{ border-left-color: var(--high); }}
+  .finding-medium {{ border-left-color: var(--medium); }}
+  .finding-low {{ border-left-color: var(--low); }}
+  .finding-head {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; font-size: 0.92rem; }}
+  .badge {{ display: inline-block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; border-radius: 4px; padding: 0.15rem 0.45rem; color: #fff; }}
+  .badge-high {{ background: var(--high); }}
+  .badge-medium {{ background: var(--medium); }}
+  .badge-low {{ background: var(--low); }}
+  .finding-kind {{ font-weight: 600; }}
+  .finding-col {{ color: var(--accent); font-family: ui-monospace, Consolas, monospace; font-size: 0.85rem; }}
+  .finding-loc {{ color: var(--muted); font-size: 0.82rem; margin-left: auto; }}
+  .finding-detail {{ margin-top: 0.3rem; color: var(--fg); font-size: 0.92rem; }}
+  .finding-extra {{ margin-top: 0.2rem; color: var(--muted); font-size: 0.82rem; }}
+  .plot {{ margin: 0 0 1.6rem; }}
+  .plot img {{ max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 8px; display: block; }}
+  .plot figcaption {{ margin-top: 0.4rem; font-size: 0.85rem; color: var(--muted); }}
+  .table-wrap {{ overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.82rem; }}
+  th, td {{ padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }}
+  th:first-child, td:first-child {{ text-align: left; }}
+  thead th {{ background: var(--card); position: sticky; top: 0; }}
+  td.row-idx {{ font-family: ui-monospace, Consolas, monospace; color: var(--muted); text-align: left; }}
+  .muted {{ color: var(--muted); font-size: 0.9rem; }}
+  footer {{ margin-top: 3rem; color: var(--muted); font-size: 0.78rem; border-top: 1px solid var(--border); padding-top: 0.8rem; }}
+  @media print {{
+    body {{ padding: 0.5in; max-width: none; }}
+    .plot {{ break-inside: avoid; }}
+    .finding {{ break-inside: avoid; }}
+    * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+  }}
+</style>
+</head>
+<body>
+<h1>{title_esc}</h1>
+<div class="generated">Generated {generated_esc} &middot; OxidePlot QC report</div>
+
+<div class="summary">
+  <div class="stat"><span class="stat-label">Rows</span><span class="stat-value">{n_rows}</span></div>
+  <div class="stat"><span class="stat-label">Columns</span><span class="stat-value">{n_cols} ({n_numeric} numeric)</span></div>
+  {time_range_row}
+</div>
+
+<div class="verdict {verdict_class}">{verdict_text_esc}</div>
+
+<h2>Findings</h2>
+{findings_html}
+
+<h2>Plots</h2>
+{plots_html}
+
+<h2>Flagged rows</h2>
+{table_html}
+
+<footer>Self-contained QC report &mdash; produced by OxidePlot's <code>report</code> tool.</footer>
+</body>
+</html>
+"#,
+        title_esc = html_escape(title),
+        generated_esc = html_escape(generated_at),
+        n_rows = n_rows,
+        n_cols = n_cols,
+        n_numeric = n_numeric,
+        time_range_row = time_range_row,
+        verdict_class = verdict_class,
+        verdict_text_esc = html_escape(&verdict_text),
+        findings_html = findings_html,
+        plots_html = plots_html,
+        table_html = table_html,
+    )
 }
