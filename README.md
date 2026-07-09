@@ -184,4 +184,4 @@ cargo build -p oxideplot-wasm --target wasm32-unknown-unknown   # the real WASM 
 
 # License
 
-All rights reserved.
+Licensed under the [MIT License](LICENSE) — free to use, modify, distribute, and fork. Contributions and forks welcome.
