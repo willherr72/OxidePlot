@@ -1,6 +1,6 @@
 [package]
 name = "oxideplot"
-version = "0.1.0"
+version = "0.1.1"
 description = "OxidePlot - Tauri + Svelte frontend"
 authors = []
 license = "MIT"

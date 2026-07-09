@@ -1,6 +1,6 @@
 [package]
 name = "oxideplot-mcp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "MCP server exposing OxidePlot to Claude: load data, describe/query it, and render plots to images."
