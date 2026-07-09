@@ -1885,6 +1885,7 @@ struct PanelSeries {
 fn build_panel(
     series: &[PanelSeries],
     x_view: (f64, f64),
+    x_origin: f64,
     w: u32,
     h: u32,
     draw_mode: DrawMode,
@@ -1964,14 +1965,16 @@ fn build_panel(
 
     let x_ticks = compute_grid_lines(x_view.0, x_view.1);
     let y_ticks = compute_grid_lines(y_view.0, y_view.1);
+    // Grid vertices share the render-space X offset (x_origin) with the series
+    // points and the uniforms below, so the grid aligns with the data.
     let mut segs: Vec<[f32; 2]> = Vec::new();
     for (xv, _) in &x_ticks {
-        segs.push([*xv as f32, y_view.0 as f32]);
-        segs.push([*xv as f32, y_view.1 as f32]);
+        segs.push([(*xv - x_origin) as f32, y_view.0 as f32]);
+        segs.push([(*xv - x_origin) as f32, y_view.1 as f32]);
     }
     for (yv, _) in &y_ticks {
-        segs.push([x_view.0 as f32, *yv as f32]);
-        segs.push([x_view.1 as f32, *yv as f32]);
+        segs.push([(x_view.0 - x_origin) as f32, *yv as f32]);
+        segs.push([(x_view.1 - x_origin) as f32, *yv as f32]);
     }
     let grid = GridGpuData {
         segments: segs,
@@ -1979,8 +1982,8 @@ fn build_panel(
         line_width: 1.0,
     };
     let uniforms = PlotUniforms {
-        view_min: [x_view.0 as f32, y_view.0 as f32],
-        view_max: [x_view.1 as f32, y_view.1 as f32],
+        view_min: [(x_view.0 - x_origin) as f32, y_view.0 as f32],
+        view_max: [(x_view.1 - x_origin) as f32, y_view.1 as f32],
         resolution: [w as f32, h as f32],
         line_width: 2.0,
         point_radius: 3.0,
@@ -2052,6 +2055,13 @@ fn prepare_render(
         Some((v, _)) => (v, true),
         None => (column_to_f64(xcol).0, false),
     };
+    // Large-coordinate render offset: datetime X is epoch seconds (~1.8e9),
+    // beyond f32 precision, so every X vertex (and the view bounds / grid) is
+    // shifted by a stable in-window origin before the f32 cast. The origin
+    // cancels in the shader's (p - view_min)/(view_max - view_min), so lines
+    // render precisely instead of collapsing. Label/tick text stays in the
+    // original epoch space (see the text companion below).
+    let x_origin = xs.iter().copied().find(|x| x.is_finite()).unwrap_or(0.0);
 
     // Per-series finite points + colour + own y-range. Very large series
     // are downsampled to ~2×width for rendering (keeps the shape, renders
@@ -2126,7 +2136,7 @@ fn prepare_render(
         let pts: Vec<[f32; 2]> = fx
             .iter()
             .zip(fy.iter())
-            .map(|(&x, &y)| [x as f32, y as f32])
+            .map(|(&x, &y)| [(x - x_origin) as f32, y as f32])
             .collect();
         sdata.push(PanelSeries {
             name: data.columns[yc].clone(),
@@ -2157,6 +2167,7 @@ fn prepare_render(
             panels.push(build_panel(
                 std::slice::from_ref(sd),
                 x_view,
+                x_origin,
                 w,
                 panel_h,
                 spec.draw_mode,
@@ -2166,7 +2177,7 @@ fn prepare_render(
         }
     } else {
         panels.push(build_panel(
-            &sdata, x_view, w, panel_h, spec.draw_mode, normalize, robust,
+            &sdata, x_view, x_origin, w, panel_h, spec.draw_mode, normalize, robust,
         ));
     }
     let out_h = panel_h * n;
