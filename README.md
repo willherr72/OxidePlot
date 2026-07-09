@@ -11,7 +11,22 @@ Built with **Tauri 2 + Svelte 5 + WebGPU**. Native-feeling interactivity — GPU
 
 ## Screenshots
 
-<!-- add screenshots of the plot / spectrogram / scatter / report here -->
+![OxidePlot — GPU-accelerated multi-channel plot](docs/screenshots/plot.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/spectrogram.png" alt="Spectrogram view"><br><sub><b>Spectrogram</b> — STFT magma heatmap (a chirp sweeping across the band)</sub></td>
+    <td width="50%"><img src="docs/screenshots/scatter.png" alt="Scatter view"><br><sub><b>Scatter</b> — one column vs another, colored by time</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/distribution.png" alt="Distribution view"><br><sub><b>Distribution</b> — a small-multiple histogram per series</sub></td>
+    <td width="50%"><img src="docs/screenshots/multi-graph.png" alt="Multi-graph workspace"><br><sub><b>Workspace</b> — a synced vertical stack of graphs</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/spectrum.png" alt="Spectrum view"><br><sub><b>Spectrum</b> — overlaid PSD (FFT), log-Y</sub></td>
+    <td width="50%"><img src="docs/screenshots/table.png" alt="Table view"><br><sub><b>Table</b> — the raw rows, sortable + filterable</sub></td>
+  </tr>
+</table>
 
 ---
 
