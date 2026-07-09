@@ -2276,18 +2276,29 @@ async fn render_rgba(prep: RenderPrep) -> Result<Vec<u8>, String> {
                         x_scale,
                     );
                 }
+                // Thin Y labels so they never overlap: short stacked panels can't
+                // fit ~8 major ticks, so skip any label within ~12px of the last
+                // one drawn. Labels are scale 1 (matching the X time labels — the
+                // old scale 2 made the axis look oversized).
+                let mut last_py: Option<i32> = None;
                 for (v, major) in compute_grid_lines(vymin, vymax) {
                     if !major {
                         continue;
                     }
                     let py = ((1.0 - (v - vymin) / yspan) * panel_h as f64) as i32 + y_off as i32;
+                    if let Some(lp) = last_py {
+                        if (lp - py).abs() < 12 {
+                            continue;
+                        }
+                    }
+                    last_py = Some(py);
                     // Log-Y: labels show the real value (10^tick), not the log.
                     let ylabel = if y_is_log {
                         format_tick_value(10f64.powf(v))
                     } else {
                         format_tick_value(v)
                     };
-                    draw_text(&mut buf, panel_w, out_h, &ylabel, 3, py - 5, lc, 2);
+                    draw_text(&mut buf, panel_w, out_h, &ylabel, 3, py - 5, lc, 1);
                 }
             }
             buf
