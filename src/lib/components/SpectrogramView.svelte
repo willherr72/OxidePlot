@@ -42,6 +42,14 @@
   // ── Lifecycle ────────────────────────────────────────────────────────────
   onMount(() => {
     mounted = true;
+    // Canvas colors are baked in at draw time (unlike the SVG views), so redraw
+    // when the theme flips.
+    const themeObserver = new MutationObserver(() => draw());
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+    return () => themeObserver.disconnect();
   });
 
   // Re-pull whenever the selected series or sample rate changes. Guarded by

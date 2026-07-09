@@ -40,6 +40,14 @@
   // ── Lifecycle ────────────────────────────────────────────────────────────
   onMount(() => {
     mounted = true;
+    // Canvas colors are baked in at draw time (unlike the SVG views, which
+    // re-theme via CSS variables), so redraw when the theme flips.
+    const themeObserver = new MutationObserver(() => draw());
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+    return () => themeObserver.disconnect();
   });
 
   // Re-pull whenever the chosen columns change. Guarded by `mounted` so this
