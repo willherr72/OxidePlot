@@ -233,11 +233,12 @@
     ctx.textBaseline = 'top';
     ctx.fillText(`${yName}  vs  ${xName}`, plotLeft, 2);
 
-    // ── Time colorbar — a thin early→late gradient strip, top-right. ───────
+    // ── Time colorbar — a thin early→late gradient strip, BOTTOM-right (the
+    // top-right is covered by the SeriesList overlay panel). ───────────────
     const barW = 70;
     const barH = 7;
     const barX = plotLeft + plotW - barW - 2;
-    const barY = plotTop + 2;
+    const barY = plotTop + plotH - barH - 22;
     const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
     for (const [t] of MAGMA_STOPS) {
       grad.addColorStop(t, magmaCss(t));
